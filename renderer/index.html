@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file: blob:; media 'self' file: blob:; style-src 'self' 'unsafe-inline'" />
+  <title>AgentVideoPlayer</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="logo" data-icon="sparkle@17"><span>AgentVideoPlayer</span></div>
+    <nav>
+      <button class="nav-btn active" data-view="library" data-icon="library@18"><span>片库</span></button>
+      <button class="nav-btn" data-view="tags" data-icon="list@18"><span>标签</span></button>
+      <button class="nav-btn" data-view="agent" data-icon="robot@18"><span>AI 助手</span></button>
+      <button class="nav-btn" data-view="settings" data-icon="gear@18"><span>设置</span></button>
+    </nav>
+    <div id="favSide">
+      <div id="favSideHead">
+        <span>收藏夹</span>
+        <span id="favSideArrow" class="icon"></span>
+      </div>
+      <div id="favSideList"></div>
+    </div>
+  </aside>
+
+  <main id="main">
+    <!-- 片库视图 -->
+    <section id="view-library" class="view active">
+      <div class="toolbar">
+        <input id="searchInput" type="search" placeholder="搜索：文件夹 / 文件 / 标签（空格分隔多个条件）" />
+        <button id="scanBtn" class="primary" data-icon="plus@15"><span>添加文件夹</span></button>
+        <button id="aiTagBtn" data-icon="sparkle@15"><span>AI 整理</span></button>
+      </div>
+      <div id="libraryMeta" class="meta"></div>
+      <div id="videoGrid" class="grid"></div>
+      <div id="emptyHint" class="empty hidden">
+        <p>片库还是空的</p>
+        <p class="sub">点击右上角「添加文件夹」扫描本地或 NAS 视频</p>
+      </div>
+    </section>
+
+    <!-- 播放视图：沉浸式 -->
+    <section id="view-player" class="view">
+      <div id="playerWrap">
+        <video id="videoEl"></video>
+        <div id="volumeOsd"><span id="osdIcon">🔊</span><div class="osd-bar"><div id="osdFill" style="width:100%"></div></div><span id="osdPct">100%</span></div>
+
+        <!-- 顶部悬浮栏 -->
+        <div id="playerTop" class="overlay-bar">
+          <div class="top-left">
+            <button id="backBtn" class="icon-btn" title="后退" data-icon="back@18"></button>
+          </div>
+          <div id="playerTitle" class="top-title"></div>
+          <div class="top-right">
+            <button id="topMuteBtn" class="icon-btn" title="静音" data-icon="volume@18"></button>
+            <button id="winMinBtn" class="icon-btn" title="最小化" data-icon="minimize@15"></button>
+            <button id="winMaxBtn" class="icon-btn" title="最大化" data-icon="maximize@14"></button>
+            <button id="winCloseBtn" class="icon-btn" title="关闭" data-icon="close@15"></button>
+          </div>
+        </div>
+
+        <!-- 左侧竖排功能栏 -->
+        <div id="playerRail" class="overlay-rail">
+          <button id="castBtn" class="rail-btn" title="投屏到电视" data-icon="cast@21"></button>
+          <button id="snapBtn" class="rail-btn" title="截图" data-icon="camera@21"></button>
+          <button id="picBtn" class="rail-btn" title="画面设置" data-icon="film@21"></button>
+          <button id="pipBtn" class="rail-btn" title="画中画" data-icon="pip@21"></button>
+        </div>
+
+        <!-- 底部悬浮控制 -->
+        <div id="playerBottom" class="overlay-bar bottom">
+          <div id="progressBar"><div id="progressBuffered"></div><div id="progressPlayed"></div><div id="progressDot"></div></div>
+          <div class="ctrl-row">
+            <button id="stopBtn" class="icon-btn big" title="停止" data-icon="stop@19"></button>
+            <button id="prevBtn" class="icon-btn big" title="上一个" data-icon="prev@19"></button>
+            <button id="playBtn" class="icon-btn big play" title="播放/暂停"></button>
+            <button id="nextBtn" class="icon-btn big" title="下一个" data-icon="next@19"></button>
+            <button id="muteBtn" class="icon-btn big" title="静音" data-icon="volume@19"></button>
+            <input id="volumeSlider" type="range" min="0" max="1" step="0.05" value="1" title="音量" />
+            <span id="timeLabel" class="time-label">00:00 / 00:00</span>
+            <span class="spacer"></span>
+            <span id="resBadge" class="badge hidden"></span>
+            <button id="speedBtn" class="ctrl-text" title="倍速">1.0</button>
+            <button id="subBtn" class="icon-btn big" title="字幕" data-icon="subtitle@19"></button>
+            <button id="listBtn" class="icon-btn big" title="播放列表" data-icon="list@19"></button>
+            <button id="setBtn" class="icon-btn big" title="播放设置" data-icon="gear@19"></button>
+            <button id="fullscreenBtn" class="icon-btn big" title="全屏" data-icon="fullscreen@19"></button>
+          </div>
+        </div>
+
+        <!-- 弹出菜单容器 -->
+        <div id="menuLayer" class="hidden"></div>
+      </div>
+      <div class="player-footer">
+        <button id="analyzeBtn" class="primary" data-icon="sparkle@15"><span>AI 分析此视频</span></button>
+        <span id="playerTags"></span>
+      </div>
+    </section>
+
+    <!-- AI 助手视图 -->
+    <section id="view-agent" class="view">
+      <div id="chatLog"></div>
+      <form id="chatForm">
+        <input id="chatInput" type="text" placeholder="例如：给没有标签的视频打上标签，然后按类型整理到文件夹" autocomplete="off" />
+        <button class="primary" type="submit"><span>发送</span></button>
+      </form>
+    </section>
+
+    <!-- 设置视图 -->
+    <section id="view-settings" class="view">
+      <h2>AI 设置（OpenAI 兼容）</h2>
+      <div class="settings-form">
+        <label>API Base URL <input id="setApiBase" type="text" placeholder="https://open.bigmodel.cn/api/paas/v4" /></label>
+        <label>API Key <input id="setApiKey" type="password" placeholder="sk-…" /></label>
+        <label>对话模型 <input id="setChatModel" type="text" placeholder="glm-4-flash" /></label>
+        <label>视觉模型（分析视频用）<input id="setVisionModel" type="text" placeholder="glm-4v-flash" /></label>
+        <div class="row">
+          <button id="saveSettings" class="primary"><span>保存</span></button>
+          <button id="testAiBtn"><span>测试连接</span></button>
+          <span id="testResult"></span>
+        </div>
+        <p class="sub">兼容 OpenAI、智谱、DeepSeek、Moonshot 等任何 OpenAI 格式接口。视觉模型需支持图片输入。</p>
+      </div>
+    </section>
+
+    <!-- 标签视图 -->
+    <section id="view-tags" class="view">
+      <div id="tagsPage"></div>
+    </section>
+
+    <!-- 收藏夹视图 -->
+    <section id="view-favs" class="view">
+      <div id="favsPage"></div>
+    </section>
+  </main>
+
+  <!-- 非播放页的窗口控制（无边框窗口） -->
+  <div id="fixedWinControls">
+    <button id="fwMin" title="最小化" data-icon="minimize@14"></button>
+    <button id="fwMax" title="最大化" data-icon="maximize@13"></button>
+    <button id="fwClose" title="关闭" data-icon="close@14"></button>
+  </div>
+
+  <!-- 视频卡片右键菜单 -->
+  <div id="ctxMenu" class="hidden"></div>
+  <div id="toast" class="hidden"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

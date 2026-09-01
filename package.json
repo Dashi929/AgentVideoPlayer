@@ -1,0 +1,52 @@
+{
+  "name": "agent-video-player",
+  "version": "0.1.0",
+  "description": "跨平台本地视频播放器，带 AI Agent 整理与片库功能",
+  "main": "main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "node scripts/dist.js"
+  },
+  "build": {
+    "appId": "com.local.agentvideoplayer",
+    "productName": "AgentVideoPlayer",
+    "directories": {
+      "output": "build-out"
+    },
+    "files": [
+      "main/**",
+      "renderer/**",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "AgentVideoPlayer-Portable.exe"
+    },
+    "nsis": {
+      "artifactName": "AgentVideoPlayer-Setup.exe",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^26.15.3"
+  }
+}
