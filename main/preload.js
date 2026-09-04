@@ -42,6 +42,15 @@ contextBridge.exposeInMainWorld('api', {
   castSearch: () => ipcRenderer.invoke('cast:search'),
   castPlay: (location, videoId, title) => ipcRenderer.invoke('cast:play', { location, videoId, title }),
 
+  // 外部打开（文件关联/命令行）：渲染层就绪后主进程推送视频记录
+  rendererReady: () => ipcRenderer.send('renderer-ready'),
+  onOpenVideoFile: (handler) => ipcRenderer.on('open-video-file', (_e, videos) => handler(videos)),
+
+  // 文件关联注册（Windows）
+  assocStatus: () => ipcRenderer.invoke('assoc:status'),
+  assocRegister: () => ipcRenderer.invoke('assoc:register'),
+  assocUnregister: () => ipcRenderer.invoke('assoc:unregister'),
+
   // 接收主进程的截帧请求，渲染层用 video+canvas 完成
   onCaptureFrames: (handler) => {
     ipcRenderer.on('capture-frames', (_e, { videoPath, times }) => {

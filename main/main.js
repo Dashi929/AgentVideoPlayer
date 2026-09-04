@@ -6,8 +6,80 @@ const scanner = require('./scanner');
 const media = require('./media');
 const files = require('./files');
 const agent = require('./agent');
+const assoc = require('./assoc');
 
 let win = null;
+
+// ---- 外部打开（文件关联 /「打开方式」/ 命令行带视频路径）----
+let rendererReady = false;
+let pendingOpenFiles = [];
+
+const samePath = (x, y) => {
+  const a = path.resolve(x), b = path.resolve(y);
+  return a === b || (process.platform === 'win32' && a.toLowerCase() === b.toLowerCase());
+};
+
+/** 外部打开的文件自动登记进片库，之后走正常播放流程（进度记忆/标签/连播都可用） */
+function importVideoFile(p) {
+  const existed = db.allVideos().find(v => v.path === p);
+  if (existed) return existed;
+  let stat;
+  try { stat = fs.statSync(p); } catch { return null; }
+  return db.upsertVideo({
+    id: scanner.videoId(p),
+    path: p,
+    name: path.basename(p),
+    folder: path.dirname(p),
+    size: stat.size,
+    mtime: stat.mtimeMs,
+    tags: [],
+    title: path.basename(p, path.extname(p)),
+    cover: null,
+    position: 0,
+    duration: null,
+    lastPlayed: 0,
+  });
+}
+
+/** 从启动参数中挑出视频文件（过滤掉 electron 自身、应用目录、flag 类参数） */
+function extractVideoPaths(argv) {
+  const appDir = app.getAppPath();
+  const out = [];
+  for (const a of argv.slice(1)) {
+    if (!a || a.startsWith('-')) continue;
+    if (a === '.' || a === './' || samePath(a, appDir)) continue;
+    try {
+      if (fs.existsSync(a) && fs.statSync(a).isFile() &&
+          scanner.VIDEO_EXT.has(path.extname(a).toLowerCase())) {
+        out.push(path.resolve(a));
+      }
+    } catch { /* 参数不可访问时忽略 */ }
+  }
+  return out;
+}
+
+function flushOpenFiles() {
+  if (!rendererReady || !win || win.isDestroyed() || !pendingOpenFiles.length) return;
+  const list = pendingOpenFiles;
+  pendingOpenFiles = [];
+  win.webContents.send('open-video-file', list);
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+function deliverOpenFiles(paths) {
+  if (!paths || !paths.length) return;
+  const videos = paths.map(importVideoFile).filter(Boolean);
+  if (!videos.length) return;
+  pendingOpenFiles.push(...videos);
+  flushOpenFiles();
+}
+
+function assocCfg() {
+  // 开发模式下 exe 是 electron.exe，打开命令需附加应用目录参数
+  return { exePath: process.execPath, appDir: app.isPackaged ? null : app.getAppPath() };
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -150,6 +222,14 @@ function registerIpc() {
 
   // 内置播放器解不了的（10-bit/HEVC 等）交给系统播放器
   ipcMain.handle('video:open-external', (_e, filePath) => shell.openPath(filePath));
+
+  // 渲染层初始化完成后通知主进程，补发启动时/运行中收到的外部打开请求
+  ipcMain.on('renderer-ready', () => { rendererReady = true; flushOpenFiles(); });
+
+  // 文件关联注册（Windows，HKCU 无需管理员）
+  ipcMain.handle('assoc:status', () => assoc.status(assocCfg(), scanner.VIDEO_EXT));
+  ipcMain.handle('assoc:register', () => assoc.register(assocCfg(), scanner.VIDEO_EXT));
+  ipcMain.handle('assoc:unregister', () => assoc.unregister(assocCfg(), scanner.VIDEO_EXT));
 
   ipcMain.handle('agent:run', async (_e, { message, history }) => {
     try {
@@ -361,26 +441,44 @@ function registerIpc() {
   });
 }
 
-app.whenReady().then(() => {
-  registerIpc();
-  createWindow();
-  // 一次性迁移：旧的"星标标签收藏"转为收藏分类
-  const oldTags = db.getSettings().favTags || [];
-  if (oldTags.length && db.getCollections().length === 0) {
-    for (const t of oldTags) {
-      const ids = db.allVideos().filter(v => (v.tags || []).includes(t)).map(v => v.id);
-      if (ids.length) db.getCollections().push({ id: 'c_mig_' + t, name: t, ids, dirs: [], createdAt: Date.now() });
+// 单实例：再次双击视频文件时转发给已运行的窗口播放，而不是另开进程
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', (_e, argv) => {
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
     }
-    db.saveCollections(db.getCollections());
-    db.updateSettings({ favTags: [] });
-  }
-  // 测试钩子：AVP_SCAN=<文件夹> 启动时自动扫描
-  if (process.env.AVP_SCAN) {
-    const folder = process.env.AVP_SCAN;
-    if (!scanRoots.includes(folder)) scanRoots.push(folder);
-    console.log('[AVP] scan result:', JSON.stringify(doRescan()));
-  }
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
-});
+    deliverOpenFiles(extractVideoPaths(argv));
+  });
+  // macOS：Finder 双击文件
+  app.on('open-file', (_e, p) => deliverOpenFiles([p]));
+
+  app.whenReady().then(() => {
+    registerIpc();
+    createWindow();
+    // 一次性迁移：旧的"星标标签收藏"转为收藏分类
+    const oldTags = db.getSettings().favTags || [];
+    if (oldTags.length && db.getCollections().length === 0) {
+      for (const t of oldTags) {
+        const ids = db.allVideos().filter(v => (v.tags || []).includes(t)).map(v => v.id);
+        if (ids.length) db.getCollections().push({ id: 'c_mig_' + t, name: t, ids, dirs: [], createdAt: Date.now() });
+      }
+      db.saveCollections(db.getCollections());
+      db.updateSettings({ favTags: [] });
+    }
+    // 测试钩子：AVP_SCAN=<文件夹> 启动时自动扫描
+    if (process.env.AVP_SCAN) {
+      const folder = process.env.AVP_SCAN;
+      if (!scanRoots.includes(folder)) scanRoots.push(folder);
+      console.log('[AVP] scan result:', JSON.stringify(doRescan()));
+    }
+    // 文件关联/命令行启动：直接播放拖进来的视频（渲染层就绪后送达）
+    deliverOpenFiles(extractVideoPaths(process.argv));
+    app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  });
+}
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

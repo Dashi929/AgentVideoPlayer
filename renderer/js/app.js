@@ -108,3 +108,12 @@ document.getElementById('aiTagBtn').addEventListener('click', () => {
 });
 
 refreshLibrary().then(refreshPages);
+
+// 外部打开（双击视频文件/「打开方式」/命令行）：主进程已把文件登记进片库，这里直接进播放器
+if (window.api.onOpenVideoFile) {
+  window.api.onOpenVideoFile((videos) => {
+    const v = (videos || []).find(Boolean);
+    if (v) showPlayer(v);
+  });
+  window.api.rendererReady();
+}

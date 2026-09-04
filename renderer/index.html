@@ -122,6 +122,16 @@
         </div>
         <p class="sub">兼容 OpenAI、智谱、DeepSeek、Moonshot 等任何 OpenAI 格式接口。视觉模型需支持图片输入。</p>
       </div>
+
+      <h2>系统文件关联（默认播放器）</h2>
+      <div class="settings-form" id="assocForm">
+        <p class="sub">把常见视频格式注册到 AgentVideoPlayer（写入当前用户注册表，无需管理员）。注册后在资源管理器中右键视频 →「打开方式」→ 选择 AgentVideoPlayer 并勾选「始终」，即可设为默认播放器。</p>
+        <div class="row">
+          <button id="assocRegisterBtn" class="primary"><span>注册文件关联</span></button>
+          <button id="assocRemoveBtn"><span>取消关联</span></button>
+          <span id="assocStatus"></span>
+        </div>
+      </div>
     </section>
 
     <!-- 标签视图 -->
