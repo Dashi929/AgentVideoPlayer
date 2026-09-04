@@ -69,6 +69,7 @@ npm run dist
 应用运行中再次双击其他视频，会在同一窗口直接切换播放。
 
 - 便携版、安装版、开发模式（`npm start`）都支持上述注册方式。
+- 开发模式下「打开方式」菜单的应用名/图标默认来自 electron.exe（显示「Electron」），注册时会自动通过 MuiCache 把显示名覆盖为 AgentVideoPlayer，并使用 `resources/icon.ico` 作为关联图标；打包版则直接使用安装 exe 自带名称与图标。
 - 若使用 NSIS 安装包并希望安装时静默注册，可改用 `build.fileAssociations` 配置（注意 electron-builder 要求同时开启 `nsis.perMachine`，安装时需要管理员权限）。
 
 ## License

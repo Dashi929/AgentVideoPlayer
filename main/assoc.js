@@ -23,13 +23,25 @@ function extList(exts) {
   return [...exts].map(e => String(e).replace(/^\./, '').toLowerCase());
 }
 
+// 「打开方式」菜单里应用条目的显示名/图标按 exe 解析（取 exe 内嵌文件描述与图标），
+// 开发模式下 exe 是 electron.exe → 显示「Electron」。MuiCache 以 exe 路径为键、
+// 优先于 exe 版本信息，覆盖它即可让菜单显示 AgentVideoPlayer（两处 MuiCache 都写）。
+function muiKeys(exePath) {
+  return [
+    'HKCU\\Software\\Microsoft\\Windows\\Shell\\MuiCache',
+    'HKCU\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\MuiCache',
+  ].map(k => ({ key: k, value: `${exePath}.FriendlyAppName` }));
+}
+
 function register(cfg, exts) {
   if (process.platform !== 'win32') return { ok: false, error: '仅支持 Windows' };
   const cmd = commandFor(cfg);
   const progKey = `HKCU\\Software\\Classes\\${PROG_ID}`;
   let r = runReg(['add', progKey, '/ve', '/t', 'REG_SZ', '/d', APP_NAME + ' 视频', '/f']);
   if (r.ok) r = runReg(['add', progKey, '/v', 'FriendlyTypeName', '/t', 'REG_SZ', '/d', APP_NAME + ' 视频', '/f']);
-  if (r.ok) r = runReg(['add', progKey + '\\DefaultIcon', '/ve', '/t', 'REG_SZ', '/d', `"${cfg.exePath}",0`, '/f']);
+  // 图标：优先应用专属 ico（「打开方式」菜单/文件图标），打包后 exe 自带图标
+  const icon = cfg.iconPath ? `"${cfg.iconPath}"` : `"${cfg.exePath}",0`;
+  if (r.ok) r = runReg(['add', progKey + '\\DefaultIcon', '/ve', '/t', 'REG_SZ', '/d', icon, '/f']);
   if (r.ok) r = runReg(['add', progKey + '\\shell\\open\\command', '/ve', '/t', 'REG_SZ', '/d', cmd, '/f']);
   if (!r.ok) return { ok: false, error: (r.out || '').trim() || '注册表写入失败' };
 
@@ -44,6 +56,9 @@ function register(cfg, exts) {
     runReg(['add', capKey + '\\FileAssociations', '/v', '.' + ext, '/t', 'REG_SZ', '/d', PROG_ID, '/f']);
   }
   runReg(['add', 'HKCU\\Software\\RegisteredApplications', '/v', APP_NAME, '/t', 'REG_SZ', '/d', `Software\\${APP_NAME}\\Capabilities`, '/f']);
+  for (const { key, value } of muiKeys(cfg.exePath)) {
+    runReg(['add', key, '/v', value, '/t', 'REG_SZ', '/d', APP_NAME, '/f']);
+  }
   return { ok: true };
 }
 
@@ -56,6 +71,9 @@ function unregister(cfg, exts) {
   runReg(['delete', `HKCU\\Software\\${APP_NAME}\\Capabilities`, '/f']);
   runReg(['delete', `HKCU\\Software\\${APP_NAME}`, '/f']);
   runReg(['delete', 'HKCU\\Software\\RegisteredApplications', '/v', APP_NAME, '/f']);
+  for (const { key, value } of muiKeys(cfg.exePath)) {
+    runReg(['delete', key, '/v', value, '/f']);
+  }
   return { ok: true };
 }
 

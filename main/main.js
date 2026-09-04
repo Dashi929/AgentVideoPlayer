@@ -78,7 +78,12 @@ function deliverOpenFiles(paths) {
 
 function assocCfg() {
   // 开发模式下 exe 是 electron.exe，打开命令需附加应用目录参数
-  return { exePath: process.execPath, appDir: app.isPackaged ? null : app.getAppPath() };
+  const iconPath = app.isPackaged ? null : path.join(app.getAppPath(), 'resources', 'icon.ico');
+  return {
+    exePath: process.execPath,
+    appDir: app.isPackaged ? null : app.getAppPath(),
+    iconPath: iconPath && fs.existsSync(iconPath) ? iconPath : null,
+  };
 }
 
 function createWindow() {
