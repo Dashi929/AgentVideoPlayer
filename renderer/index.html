@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file: blob:; media 'self' file: blob:; style-src 'self' 'unsafe-inline'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file: blob:; media-src 'self' file: blob: http://127.0.0.1:*; style-src 'self' 'unsafe-inline'" />
   <title>AgentVideoPlayer</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -83,18 +83,21 @@
             <span id="resBadge" class="badge hidden"></span>
             <button id="speedBtn" class="ctrl-text" title="倍速">1.0</button>
             <button id="subBtn" class="icon-btn big" title="字幕" data-icon="subtitle@19"></button>
+            <button id="audioBtn" class="icon-btn big" title="音轨" data-icon="audio@19"></button>
             <button id="listBtn" class="icon-btn big" title="播放列表" data-icon="list@19"></button>
             <button id="setBtn" class="icon-btn big" title="播放设置" data-icon="gear@19"></button>
             <button id="fullscreenBtn" class="icon-btn big" title="全屏" data-icon="fullscreen@19"></button>
           </div>
         </div>
 
+        <!-- 进度条悬停/拖动预览 -->
+        <div id="seekPreview" class="hidden">
+          <canvas id="previewCanvas" width="256" height="144"></canvas>
+          <span id="previewTime">00:00</span>
+        </div>
+
         <!-- 弹出菜单容器 -->
         <div id="menuLayer" class="hidden"></div>
-      </div>
-      <div class="player-footer">
-        <button id="analyzeBtn" class="primary" data-icon="sparkle@15"><span>AI 分析此视频</span></button>
-        <span id="playerTags"></span>
       </div>
     </section>
 

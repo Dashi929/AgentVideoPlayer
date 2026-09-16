@@ -13,6 +13,12 @@ contextBridge.exposeInMainWorld('api', {
   readVideo: (p) => ipcRenderer.invoke('video:read', p),
   openExternal: (p) => ipcRenderer.invoke('video:open-external', p),
 
+  // 音轨探测 + 实时转码流（不支持的音轨转 AAC；audioIndex 选择多音轨中的一条）
+  probeAudio: (p) => ipcRenderer.invoke('media:probe', p),
+  avStart: (file, startAt, audioIndex) => ipcRenderer.invoke('av:start', { file, startAt, audioIndex }),
+  avSeek: (id, t, audioIndex) => ipcRenderer.invoke('av:seek', { id, t, audioIndex }),
+  avStop: (id) => ipcRenderer.invoke('av:stop', id),
+
   runAgent: (message, history) => ipcRenderer.invoke('agent:run', { message, history }),
   testAi: () => ipcRenderer.invoke('ai:test'),
 

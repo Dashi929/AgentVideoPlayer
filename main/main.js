@@ -4,6 +4,7 @@ const fs = require('fs');
 const db = require('./db');
 const scanner = require('./scanner');
 const media = require('./media');
+const avstream = require('./avstream');
 const files = require('./files');
 const agent = require('./agent');
 const assoc = require('./assoc');
@@ -80,10 +81,16 @@ function assocCfg() {
   // 开发模式下 exe 是 electron.exe，打开命令需附加应用目录参数
   const iconPath = app.isPackaged ? null : path.join(app.getAppPath(), 'resources', 'icon.ico');
   return {
-    exePath: process.execPath,
+    exePath: portableExe() || process.execPath,
     appDir: app.isPackaged ? null : app.getAppPath(),
     iconPath: iconPath && fs.existsSync(iconPath) ? iconPath : null,
   };
+}
+
+/** Portable 版运行时 exe 在临时解包目录，注册要指向用户手里的 Portable exe 本体 */
+function portableExe() {
+  const p = process.env.PORTABLE_EXECUTABLE_FILE;
+  return app.isPackaged && p && fs.existsSync(p) ? p : null;
 }
 
 function createWindow() {
@@ -219,14 +226,23 @@ function registerIpc() {
   ipcMain.handle('library:update', (_e, patch) => db.upsertVideo(patch));
 
   ipcMain.handle('video:read', async (_e, filePath) => {
-    // 校验是库内视频，返回可直接喂给 <video> 的 URL
+    // 校验是库内视频，返回可直接喂给 <video> 的 URL；audio 为缓存过的编码探测结果（可能为 null）
     const v = db.allVideos().find(v => v.path === filePath);
     if (!v) throw new Error('不在片库中');
-    return { url: toFileUrl(filePath), video: v };
+    return { url: toFileUrl(filePath), video: v, audio: media.peekProbe(filePath) };
   });
 
   // 内置播放器解不了的（10-bit/HEVC 等）交给系统播放器
   ipcMain.handle('video:open-external', (_e, filePath) => shell.openPath(filePath));
+
+  // 音轨探测 + 实时转码流（AC3/E-AC3/DTS 转码；多音轨选轨重混/转码）
+  ipcMain.handle('media:probe', (_e, file) => media.probeMedia(file));
+  ipcMain.handle('av:start', async (_e, { file, startAt, audioIndex }) => {
+    const r = await avstream.start({ file, startAt, audioIndex });
+    return r ? { ok: true, id: r.id, url: r.url, offset: r.offset, audioIndex: r.audioIndex } : { ok: false };
+  });
+  ipcMain.handle('av:seek', (_e, { id, t, audioIndex }) => avstream.seek(id, t, audioIndex));
+  ipcMain.handle('av:stop', (_e, id) => { avstream.stop(id); return true; });
 
   // 渲染层初始化完成后通知主进程，补发启动时/运行中收到的外部打开请求
   ipcMain.on('renderer-ready', () => { rendererReady = true; flushOpenFiles(); });
@@ -409,19 +425,19 @@ function registerIpc() {
   // ---- AI 任务队列（串行处理，可删除/撤销）----
   const queue = require('./queue');
   const agentMod = agent;
-  const media = require('./aiMedia');
+  const aiMedia = require('./aiMedia');
   const capture = (videoPath, times) =>
     agentMod.captureFrames(videoPath, times, (ch, payload) =>
       ch === 'capture-frames' ? askRendererCapture(payload.videoPath, payload.times) : null);
   queue.init({
     sendToRenderer: (ch, payload) => win?.webContents.send(ch, payload),
-    webTag: (v, onStep) => media.webTag(v, onStep),
+    webTag: (v, onStep) => aiMedia.webTag(v, onStep),
     runAgent: (msg) => agentMod.runAgent(msg, [], (ch, payload) =>
       ch === 'capture-frames' ? askRendererCapture(payload.videoPath, payload.times) : null),
-    coverFor: (v, onStep) => media.coverFor(v, capture, onStep || (() => {})),
-    subtitleFor: (v, onStep) => media.subtitleFor(v, onStep || (() => {})),
-    seriesTagFor: (dir, onStep) => media.seriesTagFor(dir, onStep || (() => {})),
-    seriesCoverFor: (dir, onStep) => media.seriesCoverFor(dir, capture, onStep || (() => {})),
+    coverFor: (v, onStep) => aiMedia.coverFor(v, capture, onStep || (() => {})),
+    subtitleFor: (v, onStep) => aiMedia.subtitleFor(v, onStep || (() => {})),
+    seriesTagFor: (dir, onStep) => aiMedia.seriesTagFor(dir, onStep || (() => {})),
+    seriesCoverFor: (dir, onStep) => aiMedia.seriesCoverFor(dir, capture, onStep || (() => {})),
   });
   ipcMain.handle('queue:add', (_e, { op, ids, dirs }) => queue.addJob(op, ids || [], dirs || []));
   ipcMain.handle('queue:remove', (_e, id) => queue.removeJob(id));
@@ -464,6 +480,15 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     registerIpc();
     createWindow();
+    // 文件关联自愈：程序换了位置（如打包版升级/从便携版换到安装版）自动重注册；
+    // 顺带把 MuiCache 显示名覆盖一次（Windows 会把它回写成 exe 的文件描述）
+    if (process.platform === 'win32') {
+      try {
+        const st = assoc.status(assocCfg(), scanner.VIDEO_EXT);
+        if (st.state === 'stale') assoc.register(assocCfg(), scanner.VIDEO_EXT);
+        else assoc.touchMuiCache(assocCfg());
+      } catch { /* 关联修复失败不影响启动 */ }
+    }
     // 一次性迁移：旧的"星标标签收藏"转为收藏分类
     const oldTags = db.getSettings().favTags || [];
     if (oldTags.length && db.getCollections().length === 0) {
@@ -487,3 +512,6 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('before-quit', () => {
+  try { require('./avstream').stopAll(); } catch { /* 退出清理 */ }
+});

@@ -89,4 +89,12 @@ function status(cfg, exts) {
   return { supported: true, state: norm(stored) === norm(commandFor(cfg)) ? 'registered' : 'stale' };
 }
 
-module.exports = { register, unregister, status, commandFor, PROG_ID };
+/** 只刷新 MuiCache 显示名（Windows 可能把它回写成 exe 的文件描述，启动时覆盖一次自愈） */
+function touchMuiCache(cfg) {
+  if (process.platform !== 'win32') return;
+  for (const { key, value } of muiKeys(cfg.exePath)) {
+    runReg(['add', key, '/v', value, '/t', 'REG_SZ', '/d', APP_NAME, '/f']);
+  }
+}
+
+module.exports = { register, unregister, status, touchMuiCache, commandFor, PROG_ID };
