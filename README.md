@@ -2,6 +2,14 @@
 
 跨平台本地视频播放器，带 AI Agent 整理与片库功能。基于 Electron 构建，运行时零第三方依赖。
 
+## 界面预览
+
+| 片库（封面 / 标签 / 观看进度 / 剧集聚合） | 沉浸式播放器 |
+| --- | --- |
+| ![片库](docs/screenshots/library.png) | ![播放器](docs/screenshots/player.png) |
+| **右键 → AI 功能（打标签 / 整理 / 字幕 / 封面）** | **标签页** |
+| ![AI 右键菜单](docs/screenshots/ai-menu.png) | ![标签页](docs/screenshots/tags.png) |
+
 ## 功能特性
 
 - **本地视频播放** — 内置播放器，支持常见视频格式，无边框窗口界面
