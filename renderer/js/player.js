@@ -585,19 +585,23 @@ function buildPlaylistFrom(all, video) {
 }
 /**
  * 播放列表 = 当前视频所在文件夹的全部视频，上一集/下一集就在这个列表里前后切换。
- * 先用现有库记录立刻组列表（打开视频零等待），再后台浅层扫描该文件夹补新下的剧集，
- * 扫描有结果就重建列表并刷新侧栏。
+ * 打开视频零等待：先用现有库记录（内存）立刻组列表开播；随后在后台浅层扫描
+ * 该视频所在文件夹（只看这一层，不碰其他目录），有新文件才重建列表并刷新侧栏。
  */
 async function loadPlaylist(video) {
   buildPlaylistFrom(await window.api.listVideos(), video);
   if (!video?.folder || !window.api.rescanFolder) return;
   const key = lowerPath(video.folder);
-  if (Date.now() - (folderScanAt.get(key) || 0) <= 60000) return;
+  if (Date.now() - (folderScanAt.get(key) || 0) <= 60000) return; // 同一文件夹 60 秒内只扫一次
   folderScanAt.set(key, Date.now());
   window.api.rescanFolder(video.folder).then(r => {
     if (!r || (!r.added && !r.removed)) return;
+    // 扫描可能早于/晚于 playVideo：以"当前视频，否则正在打开的这个"为准；
+    // 若已切到其他文件夹的视频则丢弃本次结果
+    const active = current || video;
+    if (lowerPath(active.folder) !== key) return;
     return window.api.listVideos().then(all => {
-      buildPlaylistFrom(all, video);
+      buildPlaylistFrom(all, active);
       if (playlistPanelOpen()) renderPlaylistPanel();
     });
   }).catch(() => {});

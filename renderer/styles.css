@@ -248,9 +248,10 @@ nav { display: flex; flex-direction: column; gap: 4px; }
 /* 倍速/分辨率：与图标按钮同风格的纯文字，无包围框，悬停同样浮起圆角底色 */
 .ctrl-text { background: transparent; border: none; color: #fff; font-size: 14px; font-weight: 600; height: 34px; padding: 0 8px; cursor: pointer; display: inline-flex; align-items: center; border-radius: 8px; }
 .ctrl-text:hover { background: rgba(255,255,255,.15); }
-.ctrl-row { display: flex; align-items: center; gap: 8px; }
+.ctrl-row { display: flex; align-items: center; gap: 8px; position: relative; }
 .ctrl-row .spacer { flex: 1; }
-.time-label { color: #fff; font-size: 14px; font-variant-numeric: tabular-nums; }
+/* 播放时间：固定在控制条水平正中（脱离 flex 流，左右集群各自靠边） */
+.time-label { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: #fff; font-size: 14px; font-variant-numeric: tabular-nums; pointer-events: none; }
 #volumeSlider {
   -webkit-appearance: none; appearance: none;
   width: 90px; height: 4px; border-radius: 2px;
