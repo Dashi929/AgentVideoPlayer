@@ -1,5 +1,6 @@
 const { app } = require('electron');
 const { execFile } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -65,6 +66,11 @@ async function probeDuration(file) {
 const AUDIO_OK = new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac']);
 // 视频流可以直接 copy 的编码；其余（mpeg4/wmv 等）转码时重编为 H.264
 const VIDEO_COPY_OK = new Set(['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1', 'mjpeg']);
+// 能被 ffmpeg 转成 WebVTT 的文本字幕编码；PGS/DVB 等图形字幕无法转文本，不列出
+const SUBTITLE_TEXT_OK = new Set([
+  'subrip', 'srt', 'ass', 'ssa', 'mov_text', 'webvtt', 'text', 'vtt',
+  'microdvd', 'subviewer', 'subviewer1', 'realtext', 'jacosub', 'mpsub', 'stl', 'pjs',
+]);
 
 /** ffmpeg 的声道描述 → 简短显示文案（stereo→立体声，5.1(side)→5.1，6 channels→6声道） */
 function channelsLabel(raw) {
@@ -80,11 +86,12 @@ function channelsLabel(raw) {
 const probeCache = new Map();
 
 /**
- * 用 ffmpeg -i 读文件头，探测音轨/视频编码。
+ * 用 ffmpeg -i 读文件头，探测音轨/视频/内嵌字幕。
  * 返回 { ok, duration, hasAudio, audioSupported, audioCodecs, audioTracks, defaultAudioIndex,
- *        videoCodec, videoCopyable }。
+ *        videoCodec, videoCopyable, subtitleTracks }。
  * audioTracks 为逐条音轨明细：{ index, streamIndex, codec, lang, channels, default, supported }，
  * 供播放器做音轨切换菜单（ffmpeg -i 不输出轨标题，标题信息拿不到）。
+ * subtitleTracks 为可转文本的内嵌字幕轨：{ streamIndex, lang, codec, default }。
  */
 function probeMedia(file) {
   let st;
@@ -101,8 +108,9 @@ function probeMedia(file) {
         if (!text.trim()) return resolve({ ok: false });
         const dur = text.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
         const duration = dur ? (+dur[1]) * 3600 + (+dur[2]) * 60 + (+dur[3]) : null;
-        const audio = [], video = [];
+        const audio = [], video = [], subs = [];
         // 形如：Stream #0:1[0x2](eng): Audio: aac (LC), 48000 Hz, stereo, fltp, 128 kb/s (default)
+        //       Stream #0:2(chi): Subtitle: ass (default)
         for (const m of text.matchAll(/Stream #\d+:(\d+)(?:\[[^\]]*\])?(?:\(([^)]*)\))?: (\w+): ([a-zA-Z0-9_]+)([^\r\n]*)/g)) {
           const entry = {
             streamIndex: +m[1],
@@ -122,6 +130,8 @@ function probeMedia(file) {
             entry.width = dim ? +dim[1] : 0;
             entry.height = dim ? +dim[2] : 0;
             video.push(entry);
+          } else if (m[3] === 'Subtitle' && SUBTITLE_TEXT_OK.has(entry.codec)) {
+            subs.push(entry);
           }
         }
         audio.forEach((t, i) => { t.index = i; });
@@ -138,6 +148,7 @@ function probeMedia(file) {
           videoWidth: video[0]?.width || 0,
           videoHeight: video[0]?.height || 0,
           videoCopyable: video.length > 0 && VIDEO_COPY_OK.has(video[0].codec),
+          subtitleTracks: subs.map(t => ({ ...t })),
         };
         probeCache.set(key, info);
         resolve(info);
@@ -179,4 +190,47 @@ function tempFramesDir() {
   return path.join(os.tmpdir(), 'agent-video-player-frames');
 }
 
-module.exports = { checkFfmpeg, ffmpegPath, probeMedia, peekProbe, probeDuration, extractFrames, tempFramesDir };
+// ---- 内嵌字幕提取（ffmpeg 转 WebVTT，磁盘 + 内存两级缓存）----
+
+const subMemCache = new Map(); // key -> vtt 文本（上限 8 条）
+function subMemSet(key, vtt) {
+  if (subMemCache.size >= 8) subMemCache.delete(subMemCache.keys().next().value);
+  subMemCache.set(key, vtt);
+}
+
+/**
+ * 提取文件内嵌字幕轨（streamIndex 为 ffmpeg 的流序号）并转成 WebVTT 文本。
+ * 同一文件+轨的结果缓存到 userData/subcache，重开视频不用再跑 ffmpeg。
+ */
+async function extractSubtitle(file, streamIndex) {
+  let st;
+  try { st = fs.statSync(file); } catch { throw new Error('文件不可访问'); }
+  const key = `${file.toLowerCase()}|${st.size}|${st.mtimeMs}|${streamIndex}`;
+  const hit = subMemCache.get(key);
+  if (hit) return hit;
+  if (!(await checkFfmpeg())) throw new Error('ffmpeg 不可用');
+  const cacheFile = path.join(app.getPath('userData'), 'subcache',
+    crypto.createHash('sha1').update(key).digest('hex') + '.vtt');
+  try {
+    const vtt = fs.readFileSync(cacheFile, 'utf8');
+    if (vtt.trim()) { subMemSet(key, vtt); return vtt; }
+  } catch { /* 无缓存则真正提取 */ }
+  const vtt = await new Promise((resolve, reject) => {
+    execFile(ffmpegPath(), [
+      '-v', 'error', '-nostdin', '-i', file, '-map', `0:${streamIndex}`,
+      '-f', 'webvtt', 'pipe:1',
+    ], { timeout: 180000, maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+      if (err) return reject(new Error(String(stderr || err.message).trim().split('\n').pop() || '提取失败'));
+      if (!stdout || !stdout.trim()) return reject(new Error('该字幕轨没有内容'));
+      resolve(stdout);
+    });
+  });
+  try {
+    fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+    fs.writeFileSync(cacheFile, vtt);
+  } catch { /* 缓存写失败不影响使用 */ }
+  subMemSet(key, vtt);
+  return vtt;
+}
+
+module.exports = { checkFfmpeg, ffmpegPath, probeMedia, peekProbe, probeDuration, extractFrames, extractSubtitle, tempFramesDir };

@@ -38,11 +38,12 @@ const previewTime = document.getElementById('previewTime');
 
 let current = null;      // 当前视频
 let fileUrl = null;      // 当前视频的 file:// URL（进度条预览用，预览需要可定位的原始文件）
-let playlist = [];       // 播放列表（片库当前排序）
+let playlist = [];       // 播放列表（当前视频所在文件夹的全部视频，按文件名自然排序）
 let saveTimer = null;
 let hideTimer = null;
 let refreshLibrary = () => {};
 let trackEl = null;      // 当前字幕 track
+let lastSubUrl = null;   // 当前字幕 blob URL（换轨时释放）
 let picSettings = { brightness: 100, contrast: 100, saturate: 100, hue: 0, fill: false };
 let stream = null;       // 实时转码会话 { id, dur, offset }（所选音轨不能直接播时启用；offset=当前会话起点，界面时间=currentTime+offset）
 let restarting = false;  // 转码流拖动重启期间，忽略旧连接断开产生的 error/ended
@@ -51,6 +52,11 @@ let lastFalseEnd = { t: 0, at: 0 }; // 假结束守卫：20 秒内同一位置�
 let barHover = false;    // 鼠标悬在进度条上时不自动收控制条/预览
 let audioTracks = [];    // 当前文件的音轨明细（probe.audioTracks）
 let audioIdx = -1;       // 转码流正在播的音轨下标；-1 = 未知（直接播放时以默认轨为准）
+let subTracks = [];      // 当前文件的内嵌字幕轨明细（probe.subtitleTracks）
+let resumeSeq = 0;       // 续播流程代次：换片/进转码流后作废旧的暂停定位看门狗
+
+const nameCollator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
+const lowerPath = (p) => String(p).toLowerCase();
 
 function fmt(s) {
   if (!isFinite(s)) return '00:00';
@@ -90,6 +96,7 @@ function trackLabel(t, i) {
   return parts.join(' · ');
 }
 const prefKey = () => 'avp_audio:' + (current ? current.path : '');
+const subKey = () => 'avp_sub:' + (current ? current.path : '');
 /** 默认轨下标（Chromium 直接播放的就是它）；没有标记默认时取第一条 */
 function defaultTrackIdx(tracks) {
   const i = (tracks || []).findIndex(t => t.default);
@@ -179,6 +186,8 @@ function playVideo(video) {
   stopStream();
   audioTracks = [];
   audioIdx = -1;
+  subTracks = [];
+  cancelResume(); // 作废上一个视频仍在进行的续播定位流程
   const seq = ++probeSeq;
   return window.api.readVideo(video.path).then(async res => {
     if (seq !== probeSeq) return;
@@ -195,6 +204,9 @@ function playVideo(video) {
       probe = await window.api.probeAudio(current.path).catch(() => null);
       if (seq !== probeSeq) return;
     }
+    // 内嵌字幕轨：自动恢复上次的选轨（没选过就用默认轨），用户关闭过则保持关闭
+    subTracks = (probe && probe.subtitleTracks) || [];
+    autoLoadSubtitle();
     if (probe && probe.ok && probe.hasAudio) {
       audioTracks = probe.audioTracks || [];
       const idx = prefTrackIdx(probe);
@@ -212,39 +224,72 @@ function playVideo(video) {
     }
     videoEl.removeAttribute('crossorigin');
     videoEl.src = res.url;
-    videoEl.play().catch(() => {});
     videoEl.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
+    // 有播放记录时先别播：等 loadedmetadata 里暂停定位到记录点，就位后再自动播放
+    if ((current.position || 0) <= 5) videoEl.play().catch(() => {});
   });
 }
 
 function onLoadedMetadata() {
   updateResBadge();
   if (stream) return; // 转码流从会话起点播，无需再定位
-  const target = current.position;
-  if (target > 5 && target < videoEl.duration - 10) {
-    // 实测：大 mkv 缺索引时"未播放就深定位"会永久卡死（readyState 停在 1），
-    // 先播起来再定位则秒级完成 —— 因此等播放流动后再跳到上次位置
-    let sought = false;
-    const onTimeupdate = () => {
-      if (sought || stream) { videoEl.removeEventListener('timeupdate', onTimeupdate); return; }
-      if (videoEl.currentTime <= 0.5) return;
-      sought = true;
-      videoEl.removeEventListener('timeupdate', onTimeupdate);
-      seekTo(target);
-      videoEl.addEventListener('seeked', () => {
-        toast(`已从上次位置 ${fmt(target)} 继续播放`);
-      }, { once: true });
-      // 看门狗：播放中定位 15 秒仍未完成 → 回到开头继续播
-      setTimeout(() => {
-        if (videoEl.seeking) {
-          seekTo(0);
-          videoEl.play().catch(() => {});
-          toast('该视频缺少索引、定位较慢，已从头播放');
-        }
-      }, 15000);
-    };
-    videoEl.addEventListener('timeupdate', onTimeupdate);
-  }
+  const target = resumeTarget(videoEl.duration);
+  if (target > 0) resumePlayback(target);
+  else videoEl.play().catch(() => {});
+}
+
+let resumeWatchdog = null;
+/** 作废进行中的续播流程：后退/停止/换片时调用，防止迟到的 seeked 自动把视频播起来 */
+function cancelResume() {
+  resumeSeq++;
+  clearTimeout(resumeWatchdog);
+}
+/**
+ * 续播：先暂停，定位到上次位置，就位后再自动播放。
+ * 实测缺索引的大 mkv 在暂停态深定位会永久卡死（readyState 停在 1 且不触发 seeked），
+ * 看门狗超时则回退成"先播起来再定位"的老办法；播放中定位 15 秒仍未完成 → 回开头继续播。
+ */
+function resumePlayback(target) {
+  const seq = ++resumeSeq;
+  videoEl.pause();
+  try { videoEl.currentTime = target; } catch { /* 元数据未就绪时忽略 */ }
+  const onSeeked = () => {
+    clearTimeout(resumeWatchdog);
+    videoEl.removeEventListener('seeked', onSeeked);
+    if (seq !== resumeSeq || stream) return; // 定位期间已切到其他视频/停止/进入转码流
+    videoEl.play().catch(() => {});
+    toast(`已从上次位置 ${fmt(target)} 继续播放`);
+  };
+  videoEl.addEventListener('seeked', onSeeked);
+  clearTimeout(resumeWatchdog);
+  resumeWatchdog = setTimeout(() => {
+    if (seq !== resumeSeq || stream) return;
+    if (videoEl.seeking || videoEl.readyState <= 1) {
+      // 暂停态定位卡死：改为播放起来再定位
+      videoEl.removeEventListener('seeked', onSeeked);
+      toast('该视频定位较慢，改为播放中跳转…');
+      const onTimeupdate = () => {
+        if (seq !== resumeSeq || stream) { videoEl.removeEventListener('timeupdate', onTimeupdate); return; }
+        if (videoEl.currentTime <= 0.5) return;
+        videoEl.removeEventListener('timeupdate', onTimeupdate);
+        videoEl.addEventListener('seeked', () => {
+          if (seq !== resumeSeq || stream) return;
+          toast(`已从上次位置 ${fmt(target)} 继续播放`);
+        }, { once: true });
+        seekTo(target);
+        setTimeout(() => {
+          if (seq !== resumeSeq) return;
+          if (videoEl.seeking) {
+            seekTo(0);
+            videoEl.play().catch(() => {});
+            toast('该视频缺少索引、定位较慢，已从头播放');
+          }
+        }, 15000);
+      };
+      videoEl.addEventListener('timeupdate', onTimeupdate);
+      videoEl.play().catch(() => {});
+    }
+  }, 3000);
 }
 
 function resumeTarget(duration) {
@@ -519,9 +564,17 @@ function updateResBadge() {
   resBadge.classList.remove('hidden');
 }
 
-async function loadPlaylist() {
+/**
+ * 播放列表 = 当前视频所在文件夹的全部视频，按文件名自然排序（E2 排在 E10 前），
+ * 上一集/下一集就在这个列表里前后切换。
+ */
+async function loadPlaylist(video) {
   const all = await window.api.listVideos();
-  playlist = [...all].sort((a, b) => (b.lastPlayed || 0) - (a.lastPlayed || 0));
+  playlist = all
+    .filter(v => lowerPath(v.folder) === lowerPath(video?.folder))
+    .sort((a, b) => nameCollator.compare(a.name, b.name) || nameCollator.compare(a.path, b.path));
+  // 兜底：库记录还没刷新时保证当前视频自己在列表里
+  if (video && !playlist.some(v => v.id === video.id)) playlist.unshift(video);
 }
 
 function neighbor(dir) {
@@ -531,7 +584,7 @@ function neighbor(dir) {
 }
 async function playNeighbor(dir) {
   const n = neighbor(dir);
-  if (n) { await playVideo(n); await loadPlaylist(); }
+  if (n) await playVideo(n);
 }
 
 function togglePlay() {
@@ -549,34 +602,112 @@ function toggleMute() {
   setMuteIcon();
 }
 
+// ---- 字幕 ----
+const SUB_CODEC_NAMES = { subrip: 'SRT', srt: 'SRT', ass: 'ASS', ssa: 'SSA', mov_text: 'TX3G', webvtt: 'WebVTT' };
+
 function removeSubtitle() {
   if (trackEl) { trackEl.remove(); trackEl = null; }
+  if (lastSubUrl) { URL.revokeObjectURL(lastSubUrl); lastSubUrl = null; }
+}
+
+/** 把 WebVTT 文本挂成 track 并显示；prefValue 用于记忆选择（null = 外挂，不记忆） */
+function applySubTrack(vtt, label, prefValue) {
+  removeSubtitle();
+  lastSubUrl = URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }));
+  trackEl = document.createElement('track');
+  trackEl.kind = 'subtitles';
+  trackEl.label = label;
+  trackEl.src = lastSubUrl;
+  trackEl.default = true;
+  trackEl.dataset.pref = prefValue || '';
+  videoEl.appendChild(trackEl);
+  if (trackEl.track) trackEl.track.mode = 'showing';
+  if (prefValue === 'off') localStorage.setItem(subKey(), 'off');
+  else if (prefValue) localStorage.setItem(subKey(), prefValue);
+  else localStorage.removeItem(subKey());
+}
+
+/** 内嵌字幕轨的显示名：语言 · 编码 ·（默认） */
+function subLabel(t) {
+  const parts = [];
+  if (t.lang && t.lang !== 'und') parts.push(LANG_NAMES[t.lang.toLowerCase()] || t.lang.toUpperCase());
+  parts.push(SUB_CODEC_NAMES[t.codec] || String(t.codec).toUpperCase());
+  if (t.default) parts.push('默认');
+  return parts.join(' · ');
+}
+
+/** 按记忆自动加载内嵌字幕：上次选过的轨优先，否则默认标记轨（没有就第一条）；用户关闭过则不加 */
+function autoLoadSubtitle() {
+  if (!subTracks.length) return;
+  const saved = localStorage.getItem(subKey());
+  if (saved === 'off') return;
+  let t = null;
+  if (saved && saved.startsWith('e:')) {
+    const si = +saved.slice(2);
+    t = subTracks.find(x => x.streamIndex === si);
+  }
+  if (!t) t = subTracks.find(x => x.default) || subTracks[0];
+  if (t) loadEmbeddedSubtitle(t, true);
+}
+
+/**
+ * 提取并加载一条内嵌字幕轨（ffmpeg 转 WebVTT，主进程有缓存）。
+ * silent = 播放时的自动加载，不弹提示。
+ */
+async function loadEmbeddedSubtitle(t, silent = false) {
+  if (!current) return;
+  const myPath = current.path;
+  if (!silent) toast('正在提取内嵌字幕…', 8000);
+  try {
+    const vtt = await window.api.extractSubtitle(myPath, t.streamIndex);
+    if (!current || current.path !== myPath) return; // 等待期间已切到其他视频
+    applySubTrack(vtt, subLabel(t), 'e:' + t.streamIndex);
+    toast((silent ? '已自动加载内嵌字幕: ' : '已加载内嵌字幕: ') + subLabel(t));
+  } catch (e) {
+    if (!silent && current && current.path === myPath) toast('内嵌字幕提取失败: ' + (e.message || e));
+  }
 }
 
 async function showSubtitleMenu() {
   if (!current) return;
-  const subs = await window.api.findSubtitles(current.path);
+  const extSubs = await window.api.findSubtitles(current.path).catch(() => []);
+  // 播放时的探测没拿到内嵌轨明细（探测失败等）：打开菜单时补一次
+  if (!subTracks.length && window.api.probeAudio) {
+    const p = current.path;
+    const info = await window.api.probeAudio(p).catch(() => null);
+    if (!current || current.path !== p) return;
+    if (info && info.ok) subTracks = info.subtitleTracks || [];
+  }
   openPopup(subBtn, (pop) => {
+    const hasAny = subTracks.length + extSubs.length > 0;
     const h = document.createElement('h4');
-    h.textContent = subs.length ? '选择字幕（同目录 .srt）' : '视频同目录未找到 .srt 字幕';
+    h.textContent = hasAny ? '选择字幕' : '该视频没有内嵌字幕，同目录也没找到 .srt';
     pop.appendChild(h);
-    menuItem(pop, '关闭字幕', !trackEl, removeSubtitle);
-    for (const s of subs) {
-      menuItem(pop, s.name, trackEl && trackEl.dataset.file === s.file, async () => {
-        removeSubtitle();
-        const vtt = await window.api.readSubtitle(s.file);
-        const blob = new Blob([vtt], { type: 'text/vtt' });
-        trackEl = document.createElement('track');
-        trackEl.kind = 'subtitles';
-        trackEl.label = s.name;
-        trackEl.src = URL.createObjectURL(blob);
-        trackEl.dataset.file = s.file;
-        trackEl.default = true;
-        videoEl.appendChild(trackEl);
-        trackEl.addEventListener('load', () => { videoEl.textTracks[0].mode = 'showing'; }, { once: true });
-        setTimeout(() => { if (videoEl.textTracks[0]) videoEl.textTracks[0].mode = 'showing'; }, 500);
-        toast('已加载字幕: ' + s.name);
-      });
+    menuItem(pop, '关闭字幕', !trackEl, () => {
+      removeSubtitle();
+      localStorage.setItem(subKey(), 'off');
+    });
+    if (subTracks.length) {
+      const cap = document.createElement('h4');
+      cap.textContent = '内嵌字幕';
+      pop.appendChild(cap);
+      for (const t of subTracks) {
+        const active = !!trackEl && trackEl.dataset.pref === 'e:' + t.streamIndex;
+        menuItem(pop, subLabel(t), active, () => loadEmbeddedSubtitle(t));
+      }
+    }
+    if (extSubs.length) {
+      const cap = document.createElement('h4');
+      cap.textContent = '同目录外挂字幕';
+      pop.appendChild(cap);
+      for (const s of extSubs) {
+        menuItem(pop, s.name, !!trackEl && trackEl.dataset.file === s.file, async () => {
+          const vtt = await window.api.readSubtitle(s.file);
+          applySubTrack(vtt, s.name, null);
+          if (trackEl) trackEl.dataset.file = s.file;
+          toast('已加载字幕: ' + s.name);
+        });
+      }
     }
   });
 }
@@ -666,7 +797,10 @@ function showSpeedMenu() {
 
 function showPlaylistMenu() {
   openPopup(listBtn, (pop) => {
-    const h = document.createElement('h4'); h.textContent = `播放列表（${playlist.length}）`; pop.appendChild(h);
+    const dirName = playlist[0]?.folder?.split('\\').filter(Boolean).pop() || '';
+    const h = document.createElement('h4');
+    h.textContent = `播放列表 · ${playlist.length} 个视频` + (dirName ? `（${dirName}）` : '');
+    pop.appendChild(h);
     for (const v of playlist.slice(0, 100)) {
       menuItem(pop, (v.id === current?.id ? '▶ ' : '') + (v.virtualName || v.title || v.name), v.id === current?.id, () => {
         playVideo(v);
@@ -762,10 +896,12 @@ export function initPlayer({ refreshLibrary: rl }) {
   refreshLibrary = rl;
   playBtn.innerHTML = icon('play', 24);
   setMuteIcon();
-  // 自动化测试钩子：当前播放位置/时长/是否转码流/音轨
+  // 自动化测试钩子：当前播放位置/时长/是否转码流/音轨/字幕
   window.__playerDebug = () => ({
     t: dispTime(), dur: knownDur(), transcoded: !!stream,
     audio: { count: audioTracks.length, idx: activeAudioIdx() },
+    subs: { embedded: subTracks.length, on: !!trackEl, label: trackEl?.label || null },
+    playlist: { count: playlist.length, folder: playlist[0]?.folder || null, idx: playlist.findIndex(v => v.id === current?.id) },
   });
 
   // ---- 音量：滑条 / 滚轮 / 上下键，带记忆 ----
@@ -809,15 +945,15 @@ export function initPlayer({ refreshLibrary: rl }) {
 
   window.__openVideo = async (video) => {
     document.body.classList.add('player-view');
-    await loadPlaylist();
-    // 保证片库列表顺序里包含当前视频
+    // 先按所点视频所在文件夹组好播放列表，上一集/下一集就按这个列表走
+    await loadPlaylist(video);
     await playVideo(video);
-    await loadPlaylist();
     showControls();
   };
 
   // 两个后退按钮都走导航历史：回到打开播放器之前的页面与层级
   const leavePlayer = () => {
+    cancelResume(); // 定位完成触发的 play() 不能在离开播放器后把视频在后台播起来
     videoEl.pause();
     stopStream();
     resetPreviewSource();
@@ -844,6 +980,7 @@ export function initPlayer({ refreshLibrary: rl }) {
   });
 
   stopBtn.addEventListener('click', () => {
+    cancelResume(); // 停止后定位完成的 seeked 不能再触发自动续播
     videoEl.pause();
     seekTo(0);
     if (current) window.api.updateVideo({ id: current.id, position: 0 });

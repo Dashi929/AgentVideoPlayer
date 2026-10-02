@@ -309,6 +309,8 @@ function registerIpc() {
       .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
     return vtt;
   });
+  // 内嵌字幕轨提取（mkv 等）：ffmpeg 转 WebVTT 文本
+  ipcMain.handle('subtitle:extract', (_e, { file, streamIndex }) => media.extractSubtitle(file, streamIndex));
 
   // 截图保存到本地 appdata
   ipcMain.handle('screenshot:save', (_e, { videoName, base64 }) => {

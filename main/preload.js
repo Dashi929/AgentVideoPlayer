@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('api', {
   winClose: () => ipcRenderer.send('window:close'),
   findSubtitles: (videoPath) => ipcRenderer.invoke('subtitle:find', videoPath),
   readSubtitle: (srtPath) => ipcRenderer.invoke('subtitle:read', srtPath),
+  extractSubtitle: (file, streamIndex) => ipcRenderer.invoke('subtitle:extract', { file, streamIndex }),
   saveScreenshot: (videoName, base64) => ipcRenderer.invoke('screenshot:save', { videoName, base64 }),
   castSearch: () => ipcRenderer.invoke('cast:search'),
   castPlay: (location, videoId, title) => ipcRenderer.invoke('cast:play', { location, videoId, title }),
