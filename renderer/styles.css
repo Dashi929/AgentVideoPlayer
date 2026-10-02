@@ -207,6 +207,8 @@ nav { display: flex; flex-direction: column; gap: 4px; }
 #playerWrap { position: relative; flex: 1; display: flex; background: #000; overflow: hidden; }
 #videoEl { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
 #playerWrap.force-fill #videoEl { object-fit: fill; }
+/* 字幕：去掉 Chromium 默认的黑底色块，改用描边阴影保证可读性 */
+#videoEl::cue { background: transparent; text-shadow: 0 0 2px rgba(0,0,0,.9), 0 1px 3px rgba(0,0,0,.9), 0 0 6px rgba(0,0,0,.7); }
 
 /* 进度条悬停/拖动预览（帧画面 + 时间） */
 #seekPreview {
