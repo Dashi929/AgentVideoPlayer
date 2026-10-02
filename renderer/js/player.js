@@ -35,6 +35,10 @@ const osdIcon = document.getElementById('osdIcon');
 const seekPreview = document.getElementById('seekPreview');
 const previewCanvas = document.getElementById('previewCanvas');
 const previewTime = document.getElementById('previewTime');
+const playListPanel = document.getElementById('playListPanel');
+const plpTitle = document.getElementById('plpTitle');
+const plpList = document.getElementById('plpList');
+const plpClose = document.getElementById('plpClose');
 
 let current = null;      // 当前视频
 let fileUrl = null;      // 当前视频的 file:// URL（进度条预览用，预览需要可定位的原始文件）
@@ -121,17 +125,22 @@ function trackNeedsStream(info, idx) {
 // ---- 控制条自动隐藏 ----
 function showControls() {
   wrap.classList.remove('controls-hidden');
+  wrap.classList.remove('cursor-hidden'); // 光标随控制条一起恢复
   clearTimeout(hideTimer);
   hideTimer = setTimeout(() => {
-    if (!videoEl.paused && !menuLayerVisible() && !barHover) {
+    if (!videoEl.paused && !menuLayerVisible() && !barHover && !playlistPanelOpen()) {
       wrap.classList.add('controls-hidden');
       hideSeekPreview();
+      // 全屏时连鼠标光标一起隐藏（侧栏开着则保留，方便点选）
+      if (document.fullscreenElement) wrap.classList.add('cursor-hidden');
     }
-  }, 2800);
+  }, 3000);
 }
 function menuLayerVisible() { return !menuLayer.classList.contains('hidden'); }
+function playlistPanelOpen() { return !playListPanel.classList.contains('hidden'); }
 wrap.addEventListener('mousemove', showControls);
 wrap.addEventListener('click', showControls);
+document.addEventListener('fullscreenchange', showControls); // 退出全屏时恢复光标/控制条
 
 // ---- 弹层菜单 ----
 function openPopup(anchorEl, build) {
@@ -194,6 +203,7 @@ function playVideo(video) {
     current = res.video;
     fileUrl = res.url;
     playerTitle.textContent = current.virtualName || current.title || current.name;
+    renderPlaylistPanel(); // 侧栏开着时同步高亮当前项
     removeSubtitle();
     resetPreviewSource();
 
@@ -587,6 +597,41 @@ async function playNeighbor(dir) {
   if (n) await playVideo(n);
 }
 
+// ---- 播放列表侧栏 ----
+/** 按当前 playlist 重绘侧栏列表（面板未开时也调用，保证展开即最新） */
+function renderPlaylistPanel() {
+  const dirName = playlist[0]?.folder?.split('\\').filter(Boolean).pop() || '';
+  plpTitle.textContent = `播放列表 · ${playlist.length}` + (dirName ? `（${dirName}）` : '');
+  plpList.innerHTML = '';
+  playlist.forEach((v, i) => {
+    const item = document.createElement('div');
+    item.className = 'plp-item' + (current && v.id === current.id ? ' active' : '');
+    const idx = document.createElement('span');
+    idx.className = 'idx';
+    idx.textContent = i + 1;
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.textContent = v.virtualName || v.title || v.name;
+    item.title = nm.textContent;
+    item.append(idx, nm);
+    item.addEventListener('click', () => playVideo(v));
+    plpList.appendChild(item);
+  });
+}
+
+async function togglePlaylistPanel() {
+  if (playlistPanelOpen()) {
+    playListPanel.classList.add('hidden');
+    showControls();
+    return;
+  }
+  if (current) await loadPlaylist(current); // 展开时刷新一遍文件夹内容
+  renderPlaylistPanel();
+  playListPanel.classList.remove('hidden');
+  showControls();
+  plpList.querySelector('.plp-item.active')?.scrollIntoView({ block: 'nearest' });
+}
+
 function togglePlay() {
   if (videoEl.paused) videoEl.play(); else videoEl.pause();
 }
@@ -795,20 +840,6 @@ function showSpeedMenu() {
   });
 }
 
-function showPlaylistMenu() {
-  openPopup(listBtn, (pop) => {
-    const dirName = playlist[0]?.folder?.split('\\').filter(Boolean).pop() || '';
-    const h = document.createElement('h4');
-    h.textContent = `播放列表 · ${playlist.length} 个视频` + (dirName ? `（${dirName}）` : '');
-    pop.appendChild(h);
-    for (const v of playlist.slice(0, 100)) {
-      menuItem(pop, (v.id === current?.id ? '▶ ' : '') + (v.virtualName || v.title || v.name), v.id === current?.id, () => {
-        playVideo(v);
-      });
-    }
-  });
-}
-
 function showSettingsMenu() {
   openPopup(setBtn, (pop) => {
     const h = document.createElement('h4'); h.textContent = '播放设置'; pop.appendChild(h);
@@ -993,7 +1024,8 @@ export function initPlayer({ refreshLibrary: rl }) {
   speedBtn.addEventListener('click', showSpeedMenu);
   subBtn.addEventListener('click', showSubtitleMenu);
   audioBtn.addEventListener('click', showAudioMenu);
-  listBtn.addEventListener('click', showPlaylistMenu);
+  listBtn.addEventListener('click', togglePlaylistPanel);
+  plpClose.addEventListener('click', togglePlaylistPanel);
   setBtn.addEventListener('click', showSettingsMenu);
   picBtn.addEventListener('click', showPicMenu);
   snapBtn.addEventListener('click', doScreenshot);
@@ -1090,6 +1122,7 @@ export function initPlayer({ refreshLibrary: rl }) {
   document.addEventListener('keydown', (e) => {
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
     showControls();
+    if (e.key === 'Escape' && playlistPanelOpen()) { playListPanel.classList.add('hidden'); return; }
     if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
     else if (e.code === 'ArrowRight') seekTo(dispTime() + 5);
     else if (e.code === 'ArrowLeft') seekTo(dispTime() - 5);

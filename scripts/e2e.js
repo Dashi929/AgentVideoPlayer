@@ -100,6 +100,19 @@ app.whenReady().then(async () => {
     const dbg4 = await poll(wc, 'window.__playerDebug()', 25000, d => d.playlist.idx === 3 && d.dur > 0);
     ok('下一集切到 E04', dbg4.playlist.idx === 3, `idx=${dbg4.playlist.idx}`);
 
+    // ---- 3.5 播放列表侧栏：展开 → 点第 6 项 → 收起 ----
+    await wc.executeJavaScript(`document.getElementById('listBtn').click(); true`);
+    const panel = await poll(wc,
+      `({ open: !document.getElementById('playListPanel').classList.contains('hidden'), n: document.querySelectorAll('.plp-item').length })`,
+      10000, s => s.open && s.n > 0);
+    ok('侧栏面板展开并列出列表', panel.n === expected, `items=${panel.n}`);
+    await wc.executeJavaScript(`document.querySelectorAll('.plp-item')[5].click(); true`);
+    const dbg6 = await poll(wc, 'window.__playerDebug()', 25000, d => d.playlist.idx === 5 && d.dur > 0);
+    ok('点面板第 6 项切到 E06', dbg6.playlist.idx === 5, `idx=${dbg6.playlist.idx}`);
+    await wc.executeJavaScript(`document.getElementById('listBtn').click(); true`);
+    const closed = await wc.executeJavaScript(`document.getElementById('playListPanel').classList.contains('hidden')`);
+    ok('面板可收起', closed);
+
     // ---- 4. 续播：先暂停定位到记录点再播放 ----
     await wc.executeJavaScript(`(async () => {
       window.__evlog = [];

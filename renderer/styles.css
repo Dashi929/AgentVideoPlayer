@@ -300,6 +300,26 @@ nav { display: flex; flex-direction: column; gap: 4px; }
 
 /* 弹出菜单层 */
 #menuLayer { position: absolute; inset: 0; z-index: 30; }
+
+/* 播放列表侧栏（右侧，可收起；顶部留出悬浮顶栏，不挡窗口控制按钮） */
+#playListPanel {
+  position: absolute; top: 54px; right: 0; bottom: 0; width: 300px; z-index: 22;
+  background: rgba(10, 12, 16, .88); backdrop-filter: blur(14px);
+  border-left: 1px solid rgba(255,255,255,.08);
+  display: flex; flex-direction: column;
+}
+#playListPanel.hidden { display: none; }
+.plp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px 8px 14px; border-bottom: 1px solid rgba(255,255,255,.08); font-size: 13px; font-weight: 600; }
+.plp-head .icon-btn { width: 30px; height: 30px; }
+#plpList { flex: 1; overflow-y: auto; padding: 6px; }
+.plp-item { display: flex; gap: 9px; align-items: baseline; padding: 9px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; color: var(--fg-dim); }
+.plp-item:hover { background: rgba(255,255,255,.08); color: var(--fg); }
+.plp-item.active { color: #4f8cff; background: rgba(79,140,255,.13); font-weight: 600; }
+.plp-item .idx { min-width: 20px; text-align: right; opacity: .65; font-size: 12px; }
+.plp-item .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 全屏播放 3 秒无操作：鼠标光标连同控制条一起隐藏 */
+#playerWrap.cursor-hidden { cursor: none; }
 .popup {
   position: absolute; background: rgba(20,22,26,.95); border: 1px solid #3a3f4a;
   border-radius: 12px; padding: 10px; min-width: 180px; max-width: calc(100% - 20px);
