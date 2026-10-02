@@ -106,6 +106,10 @@ app.whenReady().then(async () => {
       `({ open: !document.getElementById('playListPanel').classList.contains('hidden'), n: document.querySelectorAll('.plp-item').length })`,
       10000, s => s.open && s.n > 0);
     ok('侧栏面板展开并列出列表', panel.n === expected, `items=${panel.n}`);
+    const names = await wc.executeJavaScript(`[...document.querySelectorAll('.plp-item .nm')].map(e => e.textContent)`);
+    const eps = names.map(n => (n.match(/S02E(\d+)/i) || [])[1]).filter(Boolean);
+    ok('侧栏按名称顺序排列（集数递增）', eps.length === expected && eps.every((e, i) => !i || +e > +eps[i - 1]),
+      eps.join(','));
     await wc.executeJavaScript(`document.querySelectorAll('.plp-item')[5].click(); true`);
     const dbg6 = await poll(wc, 'window.__playerDebug()', 25000, d => d.playlist.idx === 5 && d.dur > 0);
     ok('点面板第 6 项切到 E06', dbg6.playlist.idx === 5, `idx=${dbg6.playlist.idx}`);
