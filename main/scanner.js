@@ -56,23 +56,29 @@ function scanFolder(folder) {
 /**
  * 浅层增量扫描：只看文件夹的直接子文件（播放列表只含本层视频），
  * 失效清理也只校验该文件夹内已登记的记录——不做全库 existsSync（网盘上会拖慢打开）。
+ * 全程异步 I/O：网络盘上同步 readdir/stat/existsSync 会阻塞主进程（HTTP 流转发也跑在
+ * 主进程，阻塞会直接造成播放卡顿/断流）。
  */
-function scanFolderShallow(folder) {
+async function scanFolderShallow(folder) {
   const total = () => db.allVideos().length;
   let entries;
-  try { entries = fs.readdirSync(folder, { withFileTypes: true }); } catch { return { added: 0, removed: 0, total: total() }; }
+  try { entries = await fs.promises.readdir(folder, { withFileTypes: true }); } catch { return { added: 0, removed: 0, total: total() }; }
   const found = new Set();
   for (const e of entries) {
     if (e.name.startsWith('.')) continue;
+    if (!VIDEO_EXT.has(path.extname(e.name).toLowerCase())) continue;
     const full = path.join(folder, e.name);
-    if (e.isFile() && VIDEO_EXT.has(path.extname(e.name).toLowerCase())) found.add(full);
+    if (e.isDirectory()) continue;
+    if (e.isFile()) { found.add(full); continue; }
+    // 个别网络文件系统 Dirent 类型为 UNKNOWN：回退异步 stat
+    try { const st = await fs.promises.stat(full); if (st.isFile()) found.add(full); } catch { /* 忽略 */ }
   }
   let added = 0;
   const existing = new Set(db.allVideos().map(v => v.path));
   for (const p of found) {
     if (existing.has(p)) continue;
     let stat;
-    try { stat = fs.statSync(p); } catch { continue; }
+    try { stat = await fs.promises.stat(p); } catch { continue; }
     db.upsertVideo({
       id: videoId(p),
       path: p,
@@ -90,10 +96,11 @@ function scanFolderShallow(folder) {
     added++;
   }
   const lower = (x) => String(x).toLowerCase();
+  const mine = Object.entries(db.load().videos).filter(([, v]) => lower(v.folder) === lower(folder));
   let removed = 0;
-  for (const [id, v] of Object.entries(db.load().videos)) {
-    if (lower(v.folder) === lower(folder) && !fs.existsSync(v.path)) { db.removeVideo(id); removed++; }
-  }
+  await Promise.all(mine.map(async ([id, v]) => {
+    try { await fs.promises.access(v.path); } catch { db.removeVideo(id); removed++; }
+  }));
   return { added, removed, total: total() };
 }
 

@@ -23,6 +23,11 @@ const IDLE_MS = 10 * 60 * 1000;
 const GAP_COPY_MAX = 1.5;
 const TRANSCODE_MAX_HEIGHT = 1440;
 
+/** 网络路径（UNC）：直放时 Chromium 深定位有病理性慢路径，这类文件一律走本地流 */
+function isNetworkPath(file) {
+  return typeof file === 'string' && (file.startsWith('\\\\') || file.startsWith('//'));
+}
+
 const sessions = new Map(); // id -> { file, startAt, info, videoCopy, audioIndex, audioCopy, proc, lastUsed }
 let server = null;
 let port = 0;
@@ -99,18 +104,22 @@ function spawnFor(sess, res) {
   proc.stdout.pipe(res);
   proc.on('error', (e) => {
     console.error('[avstream] ffmpeg 启动失败:', e.message, 'path:', media.ffmpegPath());
-    sess.proc = null;
+    if (sess.proc === proc) sess.proc = null;
     try { res.destroy(); } catch { /* 已断开 */ }
   });
   proc.on('exit', code => {
     if (code && code !== 0) console.error('[avstream] ffmpeg 异常退出 code=' + code, errTail.split('\n').slice(-3).join(' | '));
-    sess.proc = null;
+    if (sess.proc === proc) sess.proc = null; // 已被新进程顶替时不动新进程的记录
     if (res.writableEnded || res.destroyed) return;
     if (code === 0) res.end();          // 正常播完
     else try { res.destroy(); } catch { /* 已断开 */ } // 异常断流 → 渲染层走播放错误浮层
   });
-  res.on('close', () => killProc(sess));
-  res.on('error', () => killProc(sess));
+  res.on('close', () => {
+    // 只在当前进程仍属于这条响应时才杀：旧连接的 close 不能误杀刚启动的新 ffmpeg
+    // （否则拖动重启时新流会被旧响应掐断，表现为断流/播放错误浮层）
+    if (sess.proc === proc) killProc(sess);
+  });
+  res.on('error', () => { if (sess.proc === proc) killProc(sess); });
 }
 
 function ensureServer() {
@@ -153,12 +162,21 @@ function setAudioTrack(sess, audioIndex) {
 
 /**
  * 决定一次会话/定位的起点与视频模式，返回实际起点（渲染层用作显示偏移）：
+ * - 纯直拷会话（remux，源编码浏览器可直接解码的网络大文件）：视频始终拷贝，
+ *   定位对齐到关键帧——打开/跳转由 ffmpeg 完成全部磁盘 I/O，避开 Chromium
+ *   直读网络文件时深定位的病理性慢路径，也避免高分辨率实时转码压垮 CPU；
  * - 视频可拷贝且分辨率不高：探测 t 之前最近关键帧 k；t-k 很小 → 拷贝并对齐到 k；
  *   t-k 很大（长 GOP）→ 转码视频从精确 t 起播，消除最大可达数秒的回跳；
  * - 视频本就不能拷贝：转码从精确 t 起播（ffmpeg 精确 seek），无需关键帧探测。
  */
 async function resolveStart(sess, t) {
   const info = sess.info;
+  if (sess.remux && info.videoCopyable) {
+    // 纯 remux 会话：视频始终直拷并对齐关键帧（探测是 ffmpeg 做的，零转码）
+    if (t > 0) t = Math.max(0, await keyframeBefore(sess.file, t));
+    sess.videoCopy = true;
+    return t;
+  }
   let copy = !!info.videoCopyable && (info.videoHeight || 0) <= TRANSCODE_MAX_HEIGHT;
   if (copy && t > 0) {
     const k = await keyframeBefore(sess.file, t);
@@ -180,10 +198,13 @@ async function start({ file, startAt = 0, audioIndex = 0 }) {
   stopAll();
   const id = crypto.randomBytes(12).toString('hex');
   const sess = { file, info, proc: null, lastUsed: Date.now() };
+  // 网络路径且视频编码可直拷 → 纯 remux 会话：音视频直接拷贝（近零 CPU），
+  // 定位对齐关键帧，规避 Chromium 直读网络文件深定位的病理性慢路径
+  sess.remux = isNetworkPath(file) && !!info.videoCopyable;
   setAudioTrack(sess, audioIndex);
   sess.startAt = await resolveStart(sess, Math.max(0, +startAt || 0));
   sessions.set(id, sess);
-  return { id, url: `http://127.0.0.1:${port}/av/${id}`, offset: sess.startAt, audioIndex: sess.audioIndex };
+  return { id, url: `http://127.0.0.1:${port}/av/${id}`, offset: sess.startAt, audioIndex: sess.audioIndex, remux: !!sess.remux };
 }
 
 /**

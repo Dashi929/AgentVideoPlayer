@@ -9,6 +9,11 @@ const fs = require('fs');
 
 // 独立临时档案，避免污染用户真实片库/设置
 app.setPath('userData', path.join(os.tmpdir(), 'avp-e2e-profile'));
+// 测试窗口是隐藏的：禁用"后台/被遮挡的静音视频自动暂停"，避免混入省电暂停噪音
+app.commandLine.appendSwitch('disable-background-media-suspend');
+app.commandLine.appendSwitch('disable-features', 'MediaSuspend,BackgroundVideoPauseOptimization,IntensiveWakeUpThrottling');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
 // 测试视频文件夹（如：E:\迅雷云盘\[NEST] Wistoria Wand and Sword S02 [CR WEB-DL 1080p AVC AAC][JPSC]）
 const testDir = process.env.AVP_E2E_DIR;
 if (!testDir || !fs.existsSync(testDir)) {
@@ -122,7 +127,8 @@ app.whenReady().then(async () => {
     const closed = await wc.executeJavaScript(`document.getElementById('playListPanel').classList.contains('hidden')`);
     ok('面板可收起', closed);
 
-    // ---- 4. 续播：先暂停定位到记录点再播放 ----
+    // ---- 4. 续播：先播放、管线进入播放态后再定位到记录点 ----
+    // （打开初期管线未播放就深定位会踩 Chromium 病理性慢路径，见 player.js resumePlayback）
     await wc.executeJavaScript(`(async () => {
       window.__evlog = [];
       const l = await window.api.listVideos();
@@ -132,13 +138,13 @@ app.whenReady().then(async () => {
       return true;
     })()`);
     await poll(wc, 'window.__evlog', 25000,
-      log => log.some(e => e.ev === 'play' && e.t > 550));
+      log => log.some(e => e.ev === 'seeked' && e.t > 550));
     const seq = await wc.executeJavaScript(`window.__evlog.map(e => e.ev + '@' + e.t).join(' ')`);
     const metaIdx = seq.indexOf('loadedmetadata');
     const seekIdx = seq.indexOf('seeking@600') >= 0 ? seq.indexOf('seeking@600') : seq.indexOf('seeking@59'); // 关键帧对齐可能落到 59x
     const playIdx = seq.indexOf('play@');
-    ok('打开后先暂停定位到记录点（seeking 先于 play）',
-      metaIdx >= 0 && seekIdx > metaIdx && playIdx > seekIdx && /seeked/.test(seq.slice(seekIdx, playIdx)),
+    ok('打开后先播放、播放中定位到记录点（play 先于 seeking）',
+      metaIdx >= 0 && playIdx !== -1 && playIdx < seekIdx && seekIdx > metaIdx && /seeked/.test(seq.slice(seekIdx)),
       seq);
     const dbg5 = await poll(wc, '(() => { const d = window.__playerDebug(); const el = document.getElementById("videoEl"); return { t: d.t, paused: el.paused, seeking: el.seeking }; })()',
       25000, s => !s.paused && !s.seeking && s.t > 590 && s.t < 660);

@@ -8,7 +8,6 @@ const stopBtn = document.getElementById('stopBtn');
 const prevBtn = document.getElementById('prevBtn');
 const nextBtn = document.getElementById('nextBtn');
 const muteBtn = document.getElementById('muteBtn');
-const topMuteBtn = document.getElementById('topMuteBtn');
 const timeLabel = document.getElementById('timeLabel');
 const progressBar = document.getElementById('progressBar');
 const progressPlayed = document.getElementById('progressPlayed');
@@ -61,6 +60,10 @@ let resumeSeq = 0;       // 续播流程代次：换片/进转码流后作废旧
 
 const nameCollator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
 const lowerPath = (p) => String(p).toLowerCase();
+/** 网络路径（UNC）：直放时 Chromium 深定位有病理性慢路径，这类文件走本地 remux 流 */
+const isNetworkPath = (p) => typeof p === 'string' && (p.startsWith('\\\\') || p.startsWith('//'));
+/** 浏览器可直接解码、能走纯 remux 流的视频编码 */
+const REMUXABLE_VIDEO = new Set(['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1']);
 
 function fmt(s) {
   if (!isFinite(s)) return '00:00';
@@ -230,12 +233,32 @@ function playVideo(video) {
         });
         return;
       }
+      // 网络路径的文件：直放时深定位会踩 Chromium 病理性慢路径（打开/跳转 20-60 秒+），
+      // 改走本地 remux 流（音视频直拷、ffmpeg 做全部磁盘 I/O），打开即在续播位置、跳转秒级
+      if (isNetworkPath(current.path) && REMUXABLE_VIDEO.has(probe.videoCodec)) {
+        const myPath = current.path;
+        const resumeAt = resumeTarget(probe.duration);
+        startStream(probe, resumeAt, idx, true).then(r => {
+          if (!current || current.path !== myPath) return; // 等待期间已切到其他视频
+          if (r) {
+            if (resumeAt > 5) toast(`已从上次位置 ${fmt(resumeAt)} 继续播放`);
+            return;
+          }
+          // remux 流启动失败：回退直放（罕见；按续播流程先播再定位）
+          videoEl.removeAttribute('crossorigin');
+          videoEl.src = fileUrl;
+          videoEl.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
+          if ((current.position || 0) <= 5) videoEl.play().catch(() => {});
+          else resumePlayback(resumeAt);
+        });
+        return;
+      }
       audioIdx = idx;
     }
     videoEl.removeAttribute('crossorigin');
     videoEl.src = res.url;
     videoEl.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
-    // 有播放记录时先别播：等 loadedmetadata 里暂停定位到记录点，就位后再自动播放
+    // 有播放记录时不在这里播：loadedmetadata 后由续播流程先播起来再定位
     if ((current.position || 0) <= 5) videoEl.play().catch(() => {});
   });
 }
@@ -249,57 +272,54 @@ function onLoadedMetadata() {
 }
 
 let resumeWatchdog = null;
-/** 作废进行中的续播流程：后退/停止/换片时调用，防止迟到的 seeked 自动把视频播起来 */
+let resumePlayingHandler = null;
+/** 作废进行中的续播流程：后退/停止/换片时调用，防止迟到的定位/播放把视频动起来 */
 function cancelResume() {
   resumeSeq++;
   clearTimeout(resumeWatchdog);
+  if (resumePlayingHandler) { videoEl.removeEventListener('playing', resumePlayingHandler); resumePlayingHandler = null; }
 }
 /**
- * 续播：先暂停，定位到上次位置，就位后再自动播放。
- * 实测缺索引的大 mkv 在暂停态深定位会永久卡死（readyState 停在 1 且不触发 seeked），
- * 看门狗超时则回退成"先播起来再定位"的老办法；播放中定位 15 秒仍未完成 → 回开头继续播。
+ * 续播：先播起来，管线进入播放态后再定位到上次位置。
+ * 实测（20GB 的 4K NAS mkv）：打开后管线尚未播放过就深定位——无论暂停还是
+ * 边播边定位——会踩进 Chromium 的病理性慢路径（20-60 秒+、期间零解码帧），
+ * 触发"定位较慢"降级；而管线进入播放态后同样的定位只要 0.1-0.4 秒，缺索引的
+ * 大 mkv 也是"先播再定位"才不卡死。播放开始 ~300ms 后发起定位；
+ * 缺索引等极端情况播放中定位 15 秒仍未完成 → 回开头继续播。
  */
 function resumePlayback(target) {
   const seq = ++resumeSeq;
-  videoEl.pause();
-  try { videoEl.currentTime = target; } catch { /* 元数据未就绪时忽略 */ }
-  const onSeeked = () => {
+  let seekIssued = false;
+  const seekToTarget = () => {
+    if (seekIssued || seq !== resumeSeq || stream) return;
+    seekIssued = true;
     clearTimeout(resumeWatchdog);
-    videoEl.removeEventListener('seeked', onSeeked);
-    if (seq !== resumeSeq || stream) return; // 定位期间已切到其他视频/停止/进入转码流
-    videoEl.play().catch(() => {});
-    toast(`已从上次位置 ${fmt(target)} 继续播放`);
+    videoEl.addEventListener('seeked', () => {
+      if (seq !== resumeSeq || stream) return;
+      videoEl.play().catch(() => {}); // 定位完成确保继续播放（含被系统省电暂停的情况）
+      toast(`已从上次位置 ${fmt(target)} 继续播放`);
+    }, { once: true });
+    try { videoEl.currentTime = target; } catch { /* 忽略 */ }
+    // 播放中定位 15 秒仍未完成（缺索引大 mkv）→ 回开头继续播
+    resumeWatchdog = setTimeout(() => {
+      if (seq !== resumeSeq || stream) return;
+      if (videoEl.seeking) {
+        seekTo(0);
+        videoEl.play().catch(() => {});
+        toast('该视频缺少索引、定位较慢，已从头播放');
+      }
+    }, 15000);
   };
-  videoEl.addEventListener('seeked', onSeeked);
-  clearTimeout(resumeWatchdog);
-  resumeWatchdog = setTimeout(() => {
-    if (seq !== resumeSeq || stream) return;
-    if (videoEl.seeking || videoEl.readyState <= 1) {
-      // 暂停态定位卡死：改为播放起来再定位
-      videoEl.removeEventListener('seeked', onSeeked);
-      toast('该视频定位较慢，改为播放中跳转…');
-      const onTimeupdate = () => {
-        if (seq !== resumeSeq || stream) { videoEl.removeEventListener('timeupdate', onTimeupdate); return; }
-        if (videoEl.currentTime <= 0.5) return;
-        videoEl.removeEventListener('timeupdate', onTimeupdate);
-        videoEl.addEventListener('seeked', () => {
-          if (seq !== resumeSeq || stream) return;
-          toast(`已从上次位置 ${fmt(target)} 继续播放`);
-        }, { once: true });
-        seekTo(target);
-        setTimeout(() => {
-          if (seq !== resumeSeq) return;
-          if (videoEl.seeking) {
-            seekTo(0);
-            videoEl.play().catch(() => {});
-            toast('该视频缺少索引、定位较慢，已从头播放');
-          }
-        }, 15000);
-      };
-      videoEl.addEventListener('timeupdate', onTimeupdate);
-      videoEl.play().catch(() => {});
-    }
-  }, 3000);
+  videoEl.play().catch(() => {});
+  if (videoEl.readyState >= 3 && !videoEl.paused) {
+    resumeWatchdog = setTimeout(seekToTarget, 300);
+  } else {
+    resumePlayingHandler = () => {
+      resumePlayingHandler = null;
+      resumeWatchdog = setTimeout(seekToTarget, 300);
+    };
+    videoEl.addEventListener('playing', resumePlayingHandler, { once: true });
+  }
 }
 
 function resumeTarget(duration) {
@@ -307,14 +327,14 @@ function resumeTarget(duration) {
   return pos > 5 && (!duration || pos < duration - 10) ? pos : 0;
 }
 
-/** 启动实时转码会话并把播放源切到转码流（idx 缺省时用记住的/默认音轨） */
-async function startStream(info, startAt, idx) {
+/** 启动实时转码会话并把播放源切到转码流（idx 缺省时用记住的/默认音轨）；silent = 失败不弹提示（调用方自行回退） */
+async function startStream(info, startAt, idx, silent = false) {
   if (!current) return null;
   const myVideo = current; // 等待 avStart 期间用户可能已切到其他视频
   const chosen = (typeof idx === 'number' && idx >= 0) ? idx : prefTrackIdx(info);
   const r = await window.api.avStart(current.path, startAt || 0, chosen).catch(() => null);
   if (!r || !r.ok) {
-    toast(info.audioSupported ? '转码流启动失败，可用系统播放器打开'
+    if (!silent) toast(info.audioSupported ? '转码流启动失败，可用系统播放器打开'
       : `音轨 ${codecLabel(info.audioCodecs)} 内置不支持，且转码启动失败，可用系统播放器打开`, 6000);
     return null;
   }
@@ -322,7 +342,7 @@ async function startStream(info, startAt, idx) {
   if (info.audioTracks && info.audioTracks.length) audioTracks = info.audioTracks;
   audioIdx = (typeof r.audioIndex === 'number' && r.audioIndex >= 0) ? r.audioIndex : chosen;
   localStorage.setItem(prefKey(), String(audioIdx));
-  stream = { id: r.id, dur: info.duration || null, offset: (typeof r.offset === 'number' && isFinite(r.offset)) ? r.offset : (startAt || 0) };
+  stream = { id: r.id, dur: info.duration || null, remux: !!r.remux, offset: (typeof r.offset === 'number' && isFinite(r.offset)) ? r.offset : (startAt || 0) };
   restarting = false;
   // 转码流带 CORS 头，crossOrigin 保证截图/画中画的 canvas 不被污染
   videoEl.setAttribute('crossorigin', 'anonymous');
@@ -659,7 +679,6 @@ function togglePlay() {
 function setMuteIcon() {
   const name = videoEl.muted || videoEl.volume === 0 ? 'muted' : 'volume';
   muteBtn.innerHTML = icon(name, 22);
-  topMuteBtn.innerHTML = icon(name, 20);
 }
 
 function toggleMute() {
@@ -790,7 +809,10 @@ function playDirect(at) {
   stopStream();
   videoEl.src = fileUrl;
   videoEl.addEventListener('loadedmetadata', () => {
-    try { videoEl.currentTime = pos; } catch { /* 元数据未就绪时忽略 */ }
+    // 播放态定位：打开初期管线未播放就深定位会踩病理性慢路径（见 resumePlayback 注释）
+    const issue = () => setTimeout(() => { try { videoEl.currentTime = pos; } catch { /* 忽略 */ } }, 300);
+    if (videoEl.readyState >= 3 && !videoEl.paused) issue();
+    else videoEl.addEventListener('playing', issue, { once: true });
   }, { once: true });
   videoEl.load();
   videoEl.play().catch(() => {});
@@ -813,7 +835,8 @@ function selectAudioTrack(i) {
     return;
   }
   if (i === activeAudioIdx()) return;
-  if (t.supported && i === defaultTrackIdx(audioTracks)) playDirect(pos); // 切回默认轨退出转码流
+  // 本地文件切回默认支持轨时退出流、恢复直接播放；网络文件保持流（直放定位慢路径）
+  if (t.supported && i === defaultTrackIdx(audioTracks) && !isNetworkPath(current.path)) playDirect(pos);
   else queueStreamRestart(pos, i); // 同一会话换轨重启，播放位置连续
   toast('已切换到 ' + trackLabel(t, i));
 }
@@ -1039,7 +1062,6 @@ export function initPlayer({ refreshLibrary: rl }) {
   prevBtn.addEventListener('click', () => playNeighbor(-1));
   nextBtn.addEventListener('click', () => playNeighbor(1));
   muteBtn.addEventListener('click', toggleMute);
-  topMuteBtn.addEventListener('click', toggleMute);
 
   speedBtn.addEventListener('click', showSpeedMenu);
   subBtn.addEventListener('click', showSubtitleMenu);
