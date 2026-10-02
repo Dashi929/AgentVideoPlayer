@@ -243,14 +243,14 @@ nav { display: flex; flex-direction: column; gap: 4px; }
   padding: 6px 10px; cursor: pointer; border-radius: 8px; line-height: 1;
 }
 .icon-btn:hover { background: rgba(255,255,255,.15); }
-.icon-btn.big { font-size: 20px; padding: 8px 12px; }
+.icon-btn.big { font-size: 20px; height: 34px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; }
 .icon-btn.play { font-size: 24px; }
-/* 倍速按钮：与 4K 徽章同款圆角矩形风格（.badge） */
-.ctrl-text { background: transparent; border: 1.5px solid rgba(255,255,255,.8); border-radius: 6px; color: #fff; font-size: 11px; font-weight: 700; padding: 3px 6px; cursor: pointer; line-height: 1.4; }
+/* 倍速按钮：与分辨率徽章同款，和控制条图标按钮同高（34px）、同圆角 */
+.ctrl-text { background: transparent; border: 1.5px solid rgba(255,255,255,.8); border-radius: 8px; color: #fff; font-size: 12px; font-weight: 700; height: 34px; padding: 0 10px; cursor: pointer; display: inline-flex; align-items: center; line-height: 1; }
 .ctrl-text:hover { background: rgba(255,255,255,.15); }
 .ctrl-row { display: flex; align-items: center; gap: 8px; }
 .ctrl-row .spacer { flex: 1; }
-.time-label { color: #fff; font-size: 14px; font-variant-numeric: tabular-nums; margin-left: 6px; }
+.time-label { color: #fff; font-size: 14px; font-variant-numeric: tabular-nums; }
 #volumeSlider {
   -webkit-appearance: none; appearance: none;
   width: 90px; height: 4px; border-radius: 2px;
@@ -275,8 +275,9 @@ nav { display: flex; flex-direction: column; gap: 4px; }
 #volumeOsd .osd-bar { width: 140px; height: 6px; background: rgba(255,255,255,.25); border-radius: 3px; overflow: hidden; }
 #volumeOsd .osd-bar > div { height: 100%; background: #2196f3; border-radius: 3px; }
 .badge {
-  border: 1.5px solid rgba(255,255,255,.8); border-radius: 6px; color: #fff;
-  font-size: 11px; font-weight: 700; padding: 3px 6px; margin-right: 4px;
+  border: 1.5px solid rgba(255,255,255,.8); border-radius: 8px; color: #fff;
+  font-size: 12px; font-weight: 700; height: 34px; padding: 0 10px;
+  display: inline-flex; align-items: center; line-height: 1;
 }
 
 /* 进度条 */
