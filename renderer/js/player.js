@@ -575,25 +575,32 @@ function updateResBadge() {
 }
 
 const folderScanAt = new Map(); // lower(folder) -> 上次扫描时间，60 秒内不重复扫同一文件夹
-/**
- * 播放列表 = 当前视频所在文件夹的全部视频，按文件名自然排序（E2 排在 E10 前），
- * 上一集/下一集就在这个列表里前后切换。
- * 点击播放时先增量扫描该文件夹：网盘/下载目录新下的剧集立刻进列表。
- */
-async function loadPlaylist(video) {
-  if (video?.folder && window.api.rescanFolder) {
-    const key = lowerPath(video.folder);
-    if (Date.now() - (folderScanAt.get(key) || 0) > 60000) {
-      folderScanAt.set(key, Date.now());
-      await window.api.rescanFolder(video.folder).catch(() => {});
-    }
-  }
-  const all = await window.api.listVideos();
+/** 用一组库记录重建播放列表：当前视频所在文件夹，按文件名自然排序 */
+function buildPlaylistFrom(all, video) {
   playlist = all
     .filter(v => lowerPath(v.folder) === lowerPath(video?.folder))
     .sort((a, b) => nameCollator.compare(a.name, b.name) || nameCollator.compare(a.path, b.path));
   // 兜底：库记录还没刷新时保证当前视频自己在列表里
   if (video && !playlist.some(v => v.id === video.id)) playlist.unshift(video);
+}
+/**
+ * 播放列表 = 当前视频所在文件夹的全部视频，上一集/下一集就在这个列表里前后切换。
+ * 先用现有库记录立刻组列表（打开视频零等待），再后台浅层扫描该文件夹补新下的剧集，
+ * 扫描有结果就重建列表并刷新侧栏。
+ */
+async function loadPlaylist(video) {
+  buildPlaylistFrom(await window.api.listVideos(), video);
+  if (!video?.folder || !window.api.rescanFolder) return;
+  const key = lowerPath(video.folder);
+  if (Date.now() - (folderScanAt.get(key) || 0) <= 60000) return;
+  folderScanAt.set(key, Date.now());
+  window.api.rescanFolder(video.folder).then(r => {
+    if (!r || (!r.added && !r.removed)) return;
+    return window.api.listVideos().then(all => {
+      buildPlaylistFrom(all, video);
+      if (playlistPanelOpen()) renderPlaylistPanel();
+    });
+  }).catch(() => {});
 }
 
 function neighbor(dir) {

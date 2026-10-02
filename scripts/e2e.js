@@ -88,7 +88,7 @@ app.whenReady().then(async () => {
       window.__openVideo(l.find(v => /S02E03/i.test(v.name)));
       return true;
     })()`);
-    const dbg3 = await poll(wc, 'window.__playerDebug()', 25000, d => d.playlist.count > 0 && d.dur > 0);
+    const dbg3 = await poll(wc, 'window.__playerDebug()', 25000, d => d.playlist.count === expected && d.dur > 0);
     ok('点击播放时扫描文件夹找回全部剧集', dbg3.playlist.count === expected, `列表 ${dbg3.playlist.count}/${expected}`);
     ok('E03 排在第 3 位', dbg3.playlist.idx === 2, `idx=${dbg3.playlist.idx}`);
 

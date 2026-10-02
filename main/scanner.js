@@ -53,4 +53,48 @@ function scanFolder(folder) {
   return { added, removed, total: db.allVideos().length };
 }
 
-module.exports = { scanFolder, videoId, VIDEO_EXT };
+/**
+ * 浅层增量扫描：只看文件夹的直接子文件（播放列表只含本层视频），
+ * 失效清理也只校验该文件夹内已登记的记录——不做全库 existsSync（网盘上会拖慢打开）。
+ */
+function scanFolderShallow(folder) {
+  const total = () => db.allVideos().length;
+  let entries;
+  try { entries = fs.readdirSync(folder, { withFileTypes: true }); } catch { return { added: 0, removed: 0, total: total() }; }
+  const found = new Set();
+  for (const e of entries) {
+    if (e.name.startsWith('.')) continue;
+    const full = path.join(folder, e.name);
+    if (e.isFile() && VIDEO_EXT.has(path.extname(e.name).toLowerCase())) found.add(full);
+  }
+  let added = 0;
+  const existing = new Set(db.allVideos().map(v => v.path));
+  for (const p of found) {
+    if (existing.has(p)) continue;
+    let stat;
+    try { stat = fs.statSync(p); } catch { continue; }
+    db.upsertVideo({
+      id: videoId(p),
+      path: p,
+      name: path.basename(p),
+      folder: path.dirname(p),
+      size: stat.size,
+      mtime: stat.mtimeMs,
+      tags: [],
+      title: path.basename(p, path.extname(p)),
+      cover: null,
+      position: 0,
+      duration: null,
+      lastPlayed: 0,
+    });
+    added++;
+  }
+  const lower = (x) => String(x).toLowerCase();
+  let removed = 0;
+  for (const [id, v] of Object.entries(db.load().videos)) {
+    if (lower(v.folder) === lower(folder) && !fs.existsSync(v.path)) { db.removeVideo(id); removed++; }
+  }
+  return { added, removed, total: total() };
+}
+
+module.exports = { scanFolder, scanFolderShallow, videoId, VIDEO_EXT };
