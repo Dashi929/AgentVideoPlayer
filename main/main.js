@@ -224,6 +224,8 @@ function registerIpc() {
   ipcMain.handle('library:list', () => db.allVideos());
   ipcMain.handle('library:folders', () => db.allFolders());
   ipcMain.handle('library:update', (_e, patch) => db.upsertVideo(patch));
+  // 增量扫描单个文件夹（点击播放时刷新所在文件夹的剧集列表用）
+  ipcMain.handle('library:rescan-folder', (_e, folder) => scanner.scanFolder(folder));
 
   ipcMain.handle('video:read', async (_e, filePath) => {
     // 校验是库内视频，返回可直接喂给 <video> 的 URL；audio 为缓存过的编码探测结果（可能为 null）

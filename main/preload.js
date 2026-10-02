@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('api', {
   listVideos: () => ipcRenderer.invoke('library:list'),
   listFolders: () => ipcRenderer.invoke('library:folders'),
   updateVideo: (patch) => ipcRenderer.invoke('library:update', patch),
+  rescanFolder: (folder) => ipcRenderer.invoke('library:rescan-folder', folder),
   readVideo: (p) => ipcRenderer.invoke('video:read', p),
   openExternal: (p) => ipcRenderer.invoke('video:open-external', p),
 

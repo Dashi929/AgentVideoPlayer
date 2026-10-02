@@ -574,11 +574,20 @@ function updateResBadge() {
   resBadge.classList.remove('hidden');
 }
 
+const folderScanAt = new Map(); // lower(folder) -> 上次扫描时间，60 秒内不重复扫同一文件夹
 /**
  * 播放列表 = 当前视频所在文件夹的全部视频，按文件名自然排序（E2 排在 E10 前），
  * 上一集/下一集就在这个列表里前后切换。
+ * 点击播放时先增量扫描该文件夹：网盘/下载目录新下的剧集立刻进列表。
  */
 async function loadPlaylist(video) {
+  if (video?.folder && window.api.rescanFolder) {
+    const key = lowerPath(video.folder);
+    if (Date.now() - (folderScanAt.get(key) || 0) > 60000) {
+      folderScanAt.set(key, Date.now());
+      await window.api.rescanFolder(video.folder).catch(() => {});
+    }
+  }
   const all = await window.api.listVideos();
   playlist = all
     .filter(v => lowerPath(v.folder) === lowerPath(video?.folder))

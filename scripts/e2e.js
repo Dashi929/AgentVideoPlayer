@@ -72,10 +72,15 @@ app.whenReady().then(async () => {
       return true;
     })()`);
 
-    const lib = await wc.executeJavaScript(`window.api.listVideos().then(l => l.map(v => ({ id: v.id, name: v.name, folder: v.folder })))`);
+    const lib = await wc.executeJavaScript(`window.api.listVideos().then(l => l.map(v => ({ id: v.id, name: v.name, folder: v.folder, path: v.path })))`);
     ok('片库扫描', lib.length >= 10, `共 ${lib.length} 个视频`);
     const folder = lib[0]?.folder;
     const expected = lib.filter(v => v.folder === folder).length;
+
+    // ---- 0.9 模拟剧集未入库：删掉 E08-E12 的库记录，点击播放时应自动扫描找回 ----
+    const stale = lib.filter(v => /S02E(08|09|10|11|12)/i.test(v.name)).map(v => v.path);
+    const removed = await wc.executeJavaScript(`window.api.removeVideos(${JSON.stringify(stale)})`);
+    ok('模拟新集未入库（删 5 条记录）', removed === 5, `removed=${removed}`);
 
     // ---- 1. 播放列表 = 同文件夹视频，自然排序 ----
     await wc.executeJavaScript(`(async () => {
@@ -84,7 +89,7 @@ app.whenReady().then(async () => {
       return true;
     })()`);
     const dbg3 = await poll(wc, 'window.__playerDebug()', 25000, d => d.playlist.count > 0 && d.dur > 0);
-    ok('播放列表=同文件夹', dbg3.playlist.count === expected, `列表 ${dbg3.playlist.count}/${expected}`);
+    ok('点击播放时扫描文件夹找回全部剧集', dbg3.playlist.count === expected, `列表 ${dbg3.playlist.count}/${expected}`);
     ok('E03 排在第 3 位', dbg3.playlist.idx === 2, `idx=${dbg3.playlist.idx}`);
 
     // ---- 2. 内嵌字幕自动加载（默认 ASS 轨） ----
