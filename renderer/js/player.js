@@ -404,7 +404,7 @@ function queueStreamRestart(t, newAudio) {
     }
     videoEl.load(); // 重新请求同一 URL，服务端按新起点/新音轨重启 ffmpeg
     videoEl.play().catch(() => {});
-  }, 250);
+  }, 80); // 防抖：吸收快速连点；关键帧查询已走 MKV 索引（毫秒级），不必久等
 }
 
 // ---- 进度条预览：隐藏 <video> 定位到悬停时间点，画到 canvas ----
