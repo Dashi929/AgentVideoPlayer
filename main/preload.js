@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('api', {
   probeAudio: (p) => ipcRenderer.invoke('media:probe', p),
   avStart: (file, startAt, audioIndex) => ipcRenderer.invoke('av:start', { file, startAt, audioIndex }),
   avSeek: (id, t, audioIndex) => ipcRenderer.invoke('av:seek', { id, t, audioIndex }),
+  avPrepare: (id, t, immediate) => ipcRenderer.invoke('av:prepare', { id, t, immediate }),
   avStop: (id) => ipcRenderer.invoke('av:stop', id),
 
   runAgent: (message, history) => ipcRenderer.invoke('agent:run', { message, history }),

@@ -364,6 +364,8 @@ function stopStream() {
 
 /** 统一定位：转码流在已缓冲范围内直接定位，范围外重启 ffmpeg 从目标时间转 */
 function seekTo(t) {
+  cancelPendingPrepare();
+  lastSeekAt = Date.now();
   if (!current || !isFinite(t) || t < 0) return;
   if (!stream) { videoEl.currentTime = t; return; }
   const local = t - stream.offset; // seekable/buffered 都是转码流自己的时间轴
@@ -372,6 +374,27 @@ function seekTo(t) {
     if (local >= sk.start(i) - 0.25 && local <= sk.end(i) + 0.25) { videoEl.currentTime = Math.max(0, local); return; }
   }
   queueStreamRestart(t);
+}
+
+// ---- 跳转预热：悬停/按下进度条时提前在服务端起流，点击直接采用已缓冲输出 ----
+let prepareTimer = null;
+let lastSeekAt = 0;
+function cancelPendingPrepare() {
+  clearTimeout(prepareTimer);
+  prepareTimer = null;
+}
+function schedulePrepare(t, immediate) {
+  if (!stream || !window.api.avPrepare) return;
+  const sid = stream.id;
+  const fire = (imm) => {
+    prepareTimer = null;
+    if (!stream || stream.id !== sid) return;
+    if (Date.now() - lastSeekAt < 400) return; // 刚跳转过：目标多半已是当前流，无需预热
+    window.api.avPrepare(sid, t, !!imm).catch(() => {});
+  };
+  clearTimeout(prepareTimer);
+  if (immediate) fire(true);                    // 按下：立即起流（跳过预读），点击即用
+  else prepareTimer = setTimeout(() => fire(false), 140); // 悬停：停稳 140ms 再起（带预读），避免扫过每个位置
 }
 
 let restartTimer = null;
@@ -404,7 +427,7 @@ function queueStreamRestart(t, newAudio) {
     }
     videoEl.load(); // 重新请求同一 URL，服务端按新起点/新音轨重启 ffmpeg
     videoEl.play().catch(() => {});
-  }, 80); // 防抖：吸收快速连点；关键帧查询已走 MKV 索引（毫秒级），不必久等
+  }, 40); // 防抖：吸收快速连点（关键帧查询走索引、服务端已有预热进程，无需久等）
 }
 
 // ---- 进度条预览：隐藏 <video> 定位到悬停时间点，画到 canvas ----
@@ -420,6 +443,9 @@ let previewWatchdog = null;
 function showSeekPreview(e, frac, scrubUI) {
   if (!current || !isFinite(knownDur()) || knownDur() <= 0) { hideSeekPreview(); return; }
   const t = frac * knownDur();
+  // 预热：悬停/拖动停稳 160ms 后提前在服务端起目标位置的流，松手跳转秒出画面
+  // （按下瞬间另有立即预热，见 progressBar mousedown）
+  schedulePrepare(t, false);
   seekPreview.classList.remove('hidden');
   const barRect = progressBar.getBoundingClientRect();
   const wrapRect = wrap.getBoundingClientRect();
@@ -1132,7 +1158,9 @@ export function initPlayer({ refreshLibrary: rl }) {
   progressBar.addEventListener('mousedown', (e) => {
     e.preventDefault();
     scrubbing = true;
-    showSeekPreview(e, progressFrac(e), true);
+    const frac = progressFrac(e);
+    showSeekPreview(e, frac, true);
+    schedulePrepare(frac * (knownDur() || 0), true); // 按下立即预热：点击跳转秒出画面
   });
   window.addEventListener('mousemove', (e) => {
     if (scrubbing) showSeekPreview(e, progressFrac(e), true);

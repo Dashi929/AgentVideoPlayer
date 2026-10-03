@@ -20,6 +20,7 @@ const ID_CUEPOINT = 0xBB;
 const ID_CUETIME = 0xB3;
 const ID_CUETRACKPOS = 0xB7;
 const ID_CUETRACK = 0xF7;
+const ID_CUECLUSTERPOS = 0xF1;
 const ID_TRACKS = 0x1654AE6B;
 const ID_TRACKENTRY = 0xAE;
 const ID_TRACKNUMBER = 0xD7;
@@ -84,6 +85,7 @@ function parseCuesSync(file) {
   if (hit) { cache.delete(key); cache.set(key, hit); return hit.times; } // LRU 触碰
 
   let times = null;
+  let entries = null;
   const fd = fs.openSync(file, 'r');
   try {
     const size = st.size;
@@ -136,21 +138,25 @@ function parseCuesSync(file) {
     if (!(cuesLen > 0) || cuesLen > 64 * 1024 * 1024) return null;
     const cuesDataStart = cuesPos + idR.len + szR.len;
     const buf = readSync(fd, cuesDataStart, Math.min(cuesLen, size - cuesDataStart));
-    const out = [];
+    const out = []; // [{ t: 秒, off: 关键帧所在 cluster 的绝对字节偏移 }]
     for (const cp of iterElements(buf, 0, buf.length)) {
       if (cp.id !== ID_CUEPOINT) continue;
-      let ct = null, track = null;
+      let ct = null, track = null, cluster = null;
       for (const f of iterElements(buf, cp.dataStart, cp.dataEnd)) {
         if (f.id === ID_CUETIME) ct = uint(buf, f.dataStart, f.dataEnd);
         else if (f.id === ID_CUETRACKPOS) {
           for (const g of iterElements(buf, f.dataStart, f.dataEnd)) {
             if (g.id === ID_CUETRACK) track = uint(buf, g.dataStart, g.dataEnd);
+            else if (g.id === ID_CUECLUSTERPOS) cluster = uint(buf, g.dataStart, g.dataEnd);
           }
         }
       }
-      if (ct != null && track === videoTrack) out.push(ct / 1000);
+      if (ct != null && track === videoTrack) {
+        out.push({ t: ct / 1000, off: cluster != null ? seg.dataStart + cluster : null });
+      }
     }
-    times = out.length ? out : null;
+    entries = out.length ? out : null;
+    times = entries ? entries.map(e => e.t) : null;
   } catch {
     times = null;
   } finally {
@@ -159,9 +165,20 @@ function parseCuesSync(file) {
 
   if (times) {
     if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
-    cache.set(key, { times });
+    cache.set(key, { times, entries });
   }
   return times;
+}
+
+/** 与 parseCuesSync 相同，但返回 [{ t, off }]（off 为关键帧所在 cluster 的绝对字节偏移） */
+function parseCuesEntriesSync(file) {
+  const st = fs.statSync(file);
+  const key = `${file.toLowerCase()}|${st.size}|${st.mtimeMs}`;
+  const hit = cache.get(key);
+  if (hit) { cache.delete(key); cache.set(key, hit); return hit.entries; }
+  parseCuesSync(file);
+  const rec = cache.get(key);
+  return rec ? rec.entries : null;
 }
 
 /** 二分：<= t 的最近关键帧时间；找不到（t 早于首个关键帧）返回 0 */
@@ -175,9 +192,20 @@ function keyframeAtOrBefore(times, t) {
   return r;
 }
 
+/** 二分：<= t 的最近关键帧条目 [{ t, off }] */
+function keyframeEntryAtOrBefore(entries, t) {
+  if (!entries || !entries.length) return null;
+  let lo = 0, hi = entries.length - 1, r = entries[0];
+  while (lo <= hi) {
+    const m = (lo + hi) >> 1;
+    if (entries[m].t <= t) { r = entries[m]; lo = m + 1; } else hi = m - 1;
+  }
+  return r;
+}
+
 /** 预热缓存（打开视频时后台调用，让后续跳转零探测开销）；失败静默 */
 function warm(file) {
   try { parseCuesSync(file); } catch { /* 忽略 */ }
 }
 
-module.exports = { parseCuesSync, keyframeAtOrBefore, warm };
+module.exports = { parseCuesSync, parseCuesEntriesSync, keyframeAtOrBefore, keyframeEntryAtOrBefore, warm };

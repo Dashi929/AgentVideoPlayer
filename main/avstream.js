@@ -12,6 +12,7 @@
  */
 const http = require('http');
 const crypto = require('crypto');
+const fs = require('fs');
 const { spawn, execFile } = require('child_process');
 const media = require('./media');
 const mkvindex = require('./mkvindex');
@@ -29,10 +30,18 @@ function isNetworkPath(file) {
   return typeof file === 'string' && (file.startsWith('\\\\') || file.startsWith('//'));
 }
 
-const sessions = new Map(); // id -> { file, startAt, info, videoCopy, audioIndex, audioCopy, proc, lastUsed }
+// 诊断开关（AVP_STREAM_DEBUG=1）：输出预热/采用/重启决策日志，排查流问题时启用
+const DBG = !!process.env.AVP_STREAM_DEBUG;
+const dbg = (...a) => { if (DBG) console.error('[avstream]', ...a); };
+
+const sessions = new Map(); // id -> { file, startAt, info, videoCopy, audioIndex, audioCopy, proc, lastUsed, prefetch }
 let server = null;
 let port = 0;
 let listenReady = null;
+
+// 预热（悬停/按下时提前起流）：缓存上限与未采用时的存活时间
+const PREFETCH_CAP = 8 * 1024 * 1024;
+const PREFETCH_TTL_MS = 8000;
 
 function argsFor(sess) {
   const args = ['-hide_banner', '-nostdin', '-loglevel', 'error',
@@ -46,6 +55,9 @@ function argsFor(sess) {
   else args.push('-c:a', 'aac', '-b:a', '320k');
   args.push('-sn', '-dn', '-muxdelay', '0',
     '-avoid_negative_ts', 'make_zero',
+    // frag_duration：不等到下一个关键帧才封分片（长 GOP 源第一片要攒数秒数据，
+    // 浏览器要等它才出画）；每 0.5 秒封一片，首片秒出。min 置 0 保证严格生效
+    '-frag_duration', '500000', '-min_frag_duration', '0',
     '-f', 'mp4', '-movflags', 'empty_moov+frag_keyframe+default_base_moof', 'pipe:1');
   return args;
 }
@@ -56,6 +68,15 @@ function killProc(sess) {
     sess.proc = null;
     try { p.kill(); } catch { /* 已退出 */ }
   }
+}
+
+/** 丢弃未采用的预热进程 */
+function killPrefetch(sess) {
+  const pf = sess && sess.prefetch;
+  if (!pf) return;
+  sess.prefetch = null;
+  clearTimeout(pf.timer);
+  try { pf.proc.kill(); } catch { /* 已退出 */ }
 }
 
 /**
@@ -103,7 +124,31 @@ function keyframeBefore(file, t) {
 
 /** 为一次 HTTP 请求启动 ffmpeg，把转码输出推给该响应 */
 function spawnFor(sess, res) {
-  killProc(sess);
+  killProc(sess); // 顶掉当前流的进程（旧连接即使未关闭也不能再占用）
+  // 采用预热进程：与本次定位目标完全一致时，直接接管已缓冲的输出（点击即切、无需重启等待）
+  const pf = sess.prefetch;
+  if (pf) {
+    dbg('spawnFor: prefetch found', JSON.stringify({ pfStart: pf.cfg.startAt, sessStart: sess.startAt, pfCopy: pf.cfg.videoCopy, sessCopy: sess.videoCopy, exit: pf.proc.exitCode, sig: pf.proc.signalCode, bytes: pf.bytes, match: pf.cfg.startAt === sess.startAt && pf.cfg.videoCopy === sess.videoCopy }));
+  } else {
+    dbg('spawnFor: no prefetch; sessStart=', sess.startAt);
+  }
+  if (pf
+    && pf.cfg.startAt === sess.startAt && pf.cfg.videoCopy === sess.videoCopy
+    && pf.cfg.audioCopy === sess.audioCopy && pf.cfg.audioIndex === sess.audioIndex
+    && pf.proc.exitCode == null && pf.proc.signalCode == null) {
+    dbg('spawnFor: ADOPT prefetch bytes=', pf.bytes);
+    sess.prefetch = null;
+    clearTimeout(pf.timer);
+    sess.proc = pf.proc;
+    sess.lastUsed = Date.now();
+    attachProc(sess, pf.proc, res);
+    try { for (const c of pf.chunks) res.write(c); } catch { /* 断开则忽略 */ }
+    pf.chunks = [];
+    pf.proc.stdout.pipe(res);
+    try { pf.proc.stdout.resume(); } catch { /* 忽略 */ } // 缓冲满暂停过则恢复流动（先 pipe 再 resume，避免丢数据）
+    return;
+  }
+  killPrefetch(sess);
   let proc;
   try {
     proc = spawn(media.ffmpegPath(), argsFor(sess), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -113,27 +158,92 @@ function spawnFor(sess, res) {
   }
   sess.proc = proc;
   sess.lastUsed = Date.now();
-  let errTail = '';
-  proc.stderr.on('data', d => { errTail = (errTail + String(d)).slice(-2000); });
+  attachProc(sess, proc, res);
   proc.stdout.pipe(res);
+}
+
+/** 进程与响应的公共接线：错误/退出/连接关闭（采用预热进程与常规启动共用） */
+function attachProc(sess, proc, res) {
+  proc.stderr.on('data', d => { proc._errTail = ((proc._errTail || '') + String(d)).slice(-2000); });
   proc.on('error', (e) => {
     console.error('[avstream] ffmpeg 启动失败:', e.message, 'path:', media.ffmpegPath());
     if (sess.proc === proc) sess.proc = null;
     try { res.destroy(); } catch { /* 已断开 */ }
   });
   proc.on('exit', code => {
-    if (code && code !== 0) console.error('[avstream] ffmpeg 异常退出 code=' + code, errTail.split('\n').slice(-3).join(' | '));
+    if (code && code !== 0) console.error('[avstream] ffmpeg 异常退出 code=' + code, String(proc._errTail || '').split('\n').slice(-3).join(' | '));
     if (sess.proc === proc) sess.proc = null; // 已被新进程顶替时不动新进程的记录
     if (res.writableEnded || res.destroyed) return;
     if (code === 0) res.end();          // 正常播完
     else try { res.destroy(); } catch { /* 已断开 */ } // 异常断流 → 渲染层走播放错误浮层
   });
   res.on('close', () => {
-    // 只在当前进程仍属于这条响应时才杀：旧连接的 close 不能误杀刚启动的新 ffmpeg
+    // 只在当前进程仍属于这条响应时才杀：旧连接的 close 不能误杀新 ffmpeg
     // （否则拖动重启时新流会被旧响应掐断，表现为断流/播放错误浮层）
     if (sess.proc === proc) killProc(sess);
   });
   res.on('error', () => { if (sess.proc === proc) killProc(sess); });
+}
+
+/**
+ * 预热指定位置：解析定位点并提前启动 ffmpeg，把输出缓冲起来（≤8MB）。
+ * 渲染层在进度条悬停/按下时调用；随后 seek 到同一位置时 spawnFor 直接采用，
+ * 点击到出画几乎没有等待。未采用则 TTL 后自动回收。
+ */
+async function prepare(id, t, immediate) {
+  const s = sessions.get(id);
+  if (!s) { dbg('prepare: no session', id); return false; }
+  const at = Math.max(0, +t || 0);
+  const { key, videoCopy } = await resolveKeyframe(s, at);
+  dbg('prepare: t=', at.toFixed(2), 'key=', key, 'copy=', videoCopy, 'immediate=', !!immediate, 'sessStart=', s.startAt, 'sessCopy=', s.videoCopy);
+  // 与当前流起点相同：跳回这里在缓冲范围内直接完成，无需预热
+  if (key === s.startAt && videoCopy === s.videoCopy) { dbg('prepare: same as current, skip'); return true; }
+  if (s.prefetch && s.prefetch.cfg.startAt === key && s.prefetch.cfg.videoCopy === videoCopy
+    && s.prefetch.cfg.audioCopy === s.audioCopy && s.prefetch.cfg.audioIndex === s.audioIndex
+    && s.prefetch.proc.exitCode == null && s.prefetch.proc.signalCode == null) {
+    dbg('prepare: already prefetched same key');
+    return true; // 同位预热已就绪
+  }
+  killPrefetch(s);
+  // 悬停预热（非 immediate）：先把目标 cluster 预读进系统缓存，SMB 重复读命中缓存从
+  // 秒级降到毫秒级，ffmpeg 随后读同一区域几乎零等待（实测 moof 产出 110-163ms → 74-81ms）。
+  // 按下瞬时（immediate）：预读会延迟 ffmpeg 启动、得不偿失——直接起流。
+  if (!immediate) {
+    const off = mkvindex.keyframeEntryAtOrBefore(mkvindex.parseCuesEntriesSync(s.file), key)?.off;
+    if (typeof off === 'number' && off > 0) {
+      await new Promise((resolve) => {
+        const fd = fs.openSync(s.file, 'r');
+        const len = Math.min(8 * 1024 * 1024, Math.max(0, fs.fstatSync(fd).size - off));
+        const buf = Buffer.alloc(len);
+        fs.read(fd, buf, 0, len, off, () => { try { fs.closeSync(fd); } catch { /* 忽略 */ } resolve(); });
+      }).catch(() => {});
+      dbg('prepare: preread done off=', off);
+    }
+  }
+  // 预读期间用户可能已完成跳转（目标成了当前流起点）：此时无需再起预热进程
+  if (s.startAt === key) { dbg('prepare: became current during preread, skip spawn'); return true; }
+  const cfg = { file: s.file, startAt: key, videoCopy, audioCopy: s.audioCopy, audioIndex: s.audioIndex };
+  let proc;
+  try {
+    proc = spawn(media.ffmpegPath(), argsFor(cfg), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch { return false; }
+  dbg('prepare: spawned prefetch key=', key);
+  const pf = { cfg, proc, chunks: [], bytes: 0, timer: null, at: Date.now() };
+  s.prefetch = pf;
+  dbg('prepare: pid=', proc.pid, 'file=', cfg.file.slice(-24));
+  proc.on('spawn', () => dbg('prefetch spawn event pid=', proc.pid));
+  proc.stdout.on('data', d => {
+    if (s.prefetch !== pf) return;
+    if (pf.bytes === 0) dbg('prefetch first data', d.length, 'after', Date.now() - pf.at, 'ms');
+    pf.bytes += d.length;
+    pf.chunks.push(d);
+    if (pf.bytes >= PREFETCH_CAP) proc.stdout.pause(); // 缓冲满则暂停读取（ffmpeg 随之阻塞）
+  });
+  proc.stderr.on('data', d => { proc._errTail = ((proc._errTail || '') + String(d)).slice(-2000); if (DBG) dbg('prefetch stderr', String(d).slice(0, 160)); });
+  proc.on('error', () => { if (s.prefetch === pf) s.prefetch = null; });
+  proc.on('exit', () => { if (s.prefetch === pf) s.prefetch = null; });
+  pf.timer = setTimeout(() => killPrefetch(s), PREFETCH_TTL_MS);
+  return true;
 }
 
 function ensureServer() {
@@ -175,7 +285,7 @@ function setAudioTrack(sess, audioIndex) {
 }
 
 /**
- * 决定一次会话/定位的起点与视频模式，返回实际起点（渲染层用作显示偏移）：
+ * 决策一次定位的起点与视频模式（纯函数，不改会话状态），返回 { key, videoCopy }：
  * - 纯直拷会话（remux，源编码浏览器可直接解码的网络大文件）：视频始终拷贝，
  *   定位对齐到关键帧——打开/跳转由 ffmpeg 完成全部磁盘 I/O，避开 Chromium
  *   直读网络文件时深定位的病理性慢路径，也避免高分辨率实时转码压垮 CPU；
@@ -183,13 +293,11 @@ function setAudioTrack(sess, audioIndex) {
  *   t-k 很大（长 GOP）→ 转码视频从精确 t 起播，消除最大可达数秒的回跳；
  * - 视频本就不能拷贝：转码从精确 t 起播（ffmpeg 精确 seek），无需关键帧探测。
  */
-async function resolveStart(sess, t) {
+async function resolveKeyframe(sess, t) {
   const info = sess.info;
   if (sess.remux && info.videoCopyable) {
-    // 纯 remux 会话：视频始终直拷并对齐关键帧（探测是 ffmpeg 做的，零转码）
     if (t > 0) t = Math.max(0, await keyframeBefore(sess.file, t));
-    sess.videoCopy = true;
-    return t;
+    return { key: t, videoCopy: true };
   }
   let copy = !!info.videoCopyable && (info.videoHeight || 0) <= TRANSCODE_MAX_HEIGHT;
   if (copy && t > 0) {
@@ -197,8 +305,14 @@ async function resolveStart(sess, t) {
     if (t - k > GAP_COPY_MAX) copy = false;
     else t = k;
   }
-  sess.videoCopy = copy;
-  return t;
+  return { key: t, videoCopy: copy };
+}
+
+/** 应用定位决策到会话，返回实际起点（渲染层用作显示偏移） */
+async function resolveStart(sess, t) {
+  const { key, videoCopy } = await resolveKeyframe(sess, t);
+  sess.videoCopy = videoCopy;
+  return key;
 }
 
 /**
@@ -241,12 +355,13 @@ function stop(id) {
   const s = sessions.get(id);
   if (!s) return;
   killProc(s);
+  killPrefetch(s);
   sessions.delete(id);
 }
 
 function stopAll() {
-  for (const s of sessions.values()) killProc(s);
+  for (const s of sessions.values()) { killProc(s); killPrefetch(s); }
   sessions.clear();
 }
 
-module.exports = { start, seek, stop, stopAll };
+module.exports = { start, seek, prepare, stop, stopAll };

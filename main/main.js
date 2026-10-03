@@ -241,9 +241,13 @@ function registerIpc() {
   ipcMain.handle('media:probe', (_e, file) => media.probeMedia(file));
   ipcMain.handle('av:start', async (_e, { file, startAt, audioIndex }) => {
     const r = await avstream.start({ file, startAt, audioIndex });
-    return r ? { ok: true, id: r.id, url: r.url, offset: r.offset, audioIndex: r.audioIndex } : { ok: false };
+    return r ? { ok: true, id: r.id, url: r.url, offset: r.offset, audioIndex: r.audioIndex, remux: !!r.remux } : { ok: false };
   });
   ipcMain.handle('av:seek', (_e, { id, t, audioIndex }) => avstream.seek(id, t, audioIndex));
+  // 跳转预热：悬停/按下进度条时提前起流，点击采用已缓冲输出（跳转秒出画面）
+  ipcMain.handle('av:prepare', async (_e, { id, t, immediate }) => {
+    try { return await avstream.prepare(id, t, immediate); } catch { return false; }
+  });
   ipcMain.handle('av:stop', (_e, id) => { avstream.stop(id); return true; });
 
   // 渲染层初始化完成后通知主进程，补发启动时/运行中收到的外部打开请求
