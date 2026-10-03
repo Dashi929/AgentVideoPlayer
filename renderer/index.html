@@ -13,6 +13,7 @@
       <button class="nav-btn active" data-view="library" data-icon="library@18"><span>片库</span></button>
       <button class="nav-btn" data-view="tags" data-icon="list@18"><span>标签</span></button>
       <button class="nav-btn" data-view="agent" data-icon="robot@18"><span>AI 助手</span></button>
+      <button class="nav-btn" data-view="history" data-icon="history@18"><span>历史记录</span></button>
       <button class="nav-btn" data-view="settings" data-icon="gear@18"><span>设置</span></button>
     </nav>
     <div id="favSide">
@@ -113,6 +114,17 @@
         <input id="chatInput" type="text" placeholder="例如：给没有标签的视频打上标签，然后按类型整理到文件夹" autocomplete="off" />
         <button class="primary" type="submit"><span>发送</span></button>
       </form>
+    </section>
+
+    <!-- 历史记录视图 -->
+    <section id="view-history" class="view">
+      <div class="page-head"><h2>历史记录</h2><button id="clearHistoryBtn" class="ghost" data-icon="trash@15"><span>清空历史</span></button></div>
+      <div id="historyMeta" class="meta"></div>
+      <div id="historyList" class="history-list"></div>
+      <div id="historyEmpty" class="empty hidden">
+        <p>还没有播放记录</p>
+        <p class="sub">播放过的视频会出现在这里</p>
+      </div>
     </section>
 
     <!-- 设置视图 -->

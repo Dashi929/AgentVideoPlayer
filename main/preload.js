@@ -31,6 +31,13 @@ contextBridge.exposeInMainWorld('api', {
   copyCollection: (id) => ipcRenderer.invoke('collections:copy', { id }),
   deleteCollection: (id) => ipcRenderer.invoke('collections:delete', { id }),
 
+  // 播放历史：只记播放过的视频；打开与资源管理器双击同一路径
+  getHistory: () => ipcRenderer.invoke('history:list'),
+  touchHistory: (rec) => ipcRenderer.invoke('history:touch', rec),
+  openHistory: (p) => ipcRenderer.invoke('history:open', p),
+  removeHistory: (paths) => ipcRenderer.invoke('history:remove', paths),
+  clearHistory: () => ipcRenderer.invoke('history:clear'),
+
   // 批量操作（多选 + 右键菜单）
   removeVideos: (paths) => ipcRenderer.invoke('library:remove', paths),
   deleteFiles: (ids) => ipcRenderer.invoke('library:deleteFiles', ids),

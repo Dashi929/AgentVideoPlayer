@@ -3,6 +3,7 @@ import { initPlayer } from './player.js';
 import { initAgent } from './agentPanel.js';
 import { initSettings } from './settings.js';
 import { refreshPages, favsSnapshot, restoreFavsState, tagsSnapshot, restoreTagsState } from './pages.js';
+import { initHistory, refreshHistory } from './history.js';
 import { icon } from './icons.js';
 
 // 填充所有静态图标：data-icon="名称" 或 "名称@尺寸"（默认 16，随文字对齐）
@@ -71,6 +72,7 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
       v.classList.toggle('active', v.id === 'view-' + btn.dataset.view));
     if (btn.dataset.view !== 'library') resetLibraryUI();
     if (btn.dataset.view === 'tags' || btn.dataset.view === 'favs') refreshPages();
+    if (btn.dataset.view === 'history') refreshHistory();
   });
 });
 
@@ -92,9 +94,10 @@ export function toast(text, ms = 3000) {
 }
 
 initLibrary();
-initPlayer({ refreshLibrary });
+initPlayer({ refreshLibrary, refreshHistory });
 initAgent();
 initSettings();
+initHistory();
 
 // 注册主进程的截帧请求处理（无 ffmpeg 时的回退通道）
 if (window.api.onCaptureFrames) window.api.onCaptureFrames();

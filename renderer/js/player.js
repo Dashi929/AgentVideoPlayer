@@ -45,6 +45,8 @@ let playlist = [];       // 播放列表（当前视频所在文件夹的全部�
 let saveTimer = null;
 let hideTimer = null;
 let refreshLibrary = () => {};
+let refreshHistory = () => {};
+let historyRecordedFor = null; // 已登记播放历史的视频 id（同一次播放只登记一次）
 let trackEl = null;      // 当前字幕 track
 let lastSubUrl = null;   // 当前字幕 blob URL（换轨时释放）
 let picSettings = { brightness: 100, contrast: 100, saturate: 100, hue: 0, fill: false };
@@ -992,8 +994,9 @@ async function showCastMenu() {
 }
 
 // ---- 事件绑定 ----
-export function initPlayer({ refreshLibrary: rl }) {
+export function initPlayer({ refreshLibrary: rl, refreshHistory: rh }) {
   refreshLibrary = rl;
+  refreshHistory = rh || (() => {});
   playBtn.innerHTML = icon('play', 24);
   setMuteIcon();
   // 自动化测试钩子：当前播放位置/时长/是否转码流/音轨/字幕
@@ -1058,6 +1061,7 @@ export function initPlayer({ refreshLibrary: rl }) {
     stopStream();
     resetPreviewSource();
     document.body.classList.remove('player-view');
+    historyRecordedFor = null; // 离开播放器视为一次播放结束，再打开会刷新记录时间
     refreshLibrary();
   };
   document.getElementById('backBtn').addEventListener('click', () => {
@@ -1070,7 +1074,15 @@ export function initPlayer({ refreshLibrary: rl }) {
   videoEl.addEventListener('dblclick', () => fullscreenBtn.click());
   videoEl.addEventListener('play', () => { playBtn.innerHTML = icon('pause', 24); showControls(); });
   videoEl.addEventListener('pause', () => { playBtn.innerHTML = icon('play', 24); showControls(); });
-  videoEl.addEventListener('playing', () => { restarting = false; });
+  videoEl.addEventListener('playing', () => {
+    restarting = false;
+    // 真正起播才登记播放历史（同一个视频一次播放只记一条，重播不重复刷时间）
+    if (current && historyRecordedFor !== current.id) {
+      historyRecordedFor = current.id;
+      window.api.touchHistory?.({ path: current.path, name: current.name, folder: current.folder });
+      refreshHistory();
+    }
+  });
   videoEl.addEventListener('volumechange', setMuteIcon);
   videoEl.addEventListener('error', () => {
     const e = videoEl.error;

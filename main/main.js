@@ -20,13 +20,9 @@ const samePath = (x, y) => {
   return a === b || (process.platform === 'win32' && a.toLowerCase() === b.toLowerCase());
 };
 
-/** 外部打开的文件自动登记进片库，之后走正常播放流程（进度记忆/标签/连播都可用） */
-function importVideoFile(p) {
-  const existed = db.allVideos().find(v => v.path === p);
-  if (existed) return existed;
-  let stat;
-  try { stat = fs.statSync(p); } catch { return null; }
-  return db.upsertVideo({
+/** 外部打开/历史记录打开共用的片库登记记录 */
+function makeVideoRecord(p, stat) {
+  return {
     id: scanner.videoId(p),
     path: p,
     name: path.basename(p),
@@ -39,7 +35,26 @@ function importVideoFile(p) {
     position: 0,
     duration: null,
     lastPlayed: 0,
-  });
+  };
+}
+
+/** 外部打开的文件自动登记进片库，之后走正常播放流程（进度记忆/标签/连播都可用） */
+function importVideoFile(p) {
+  const existed = db.allVideos().find(v => v.path === p);
+  if (existed) return existed;
+  let stat;
+  try { stat = fs.statSync(p); } catch { return null; }
+  return db.upsertVideo(makeVideoRecord(p, stat));
+}
+
+/** 历史记录打开用：与 importVideoFile 等价的异步版，网络盘上不阻塞主进程 */
+async function importVideoFileAsync(p) {
+  const existed = db.allVideos().find(v => v.path === p);
+  if (existed) return existed;
+  let stat;
+  try { stat = await fs.promises.stat(p); } catch { return null; }
+  if (!stat.isFile()) return null;
+  return db.upsertVideo(makeVideoRecord(p, stat));
 }
 
 /** 从启动参数中挑出视频文件（过滤掉 electron 自身、应用目录、flag 类参数） */
@@ -69,12 +84,16 @@ function flushOpenFiles() {
   win.focus();
 }
 
-function deliverOpenFiles(paths) {
-  if (!paths || !paths.length) return;
-  const videos = paths.map(importVideoFile).filter(Boolean);
+/** 已登记的片库记录 → 待播放队列（渲染层就绪后立即送达 showPlayer） */
+function queueOpenVideos(videos) {
   if (!videos.length) return;
   pendingOpenFiles.push(...videos);
   flushOpenFiles();
+}
+
+function deliverOpenFiles(paths) {
+  if (!paths || !paths.length) return;
+  queueOpenVideos(paths.map(importVideoFile).filter(Boolean));
 }
 
 function assocCfg() {
@@ -226,6 +245,26 @@ function registerIpc() {
   ipcMain.handle('library:update', (_e, patch) => db.upsertVideo(patch));
   // 浅层增量扫描单个文件夹（点击播放时刷新所在文件夹的剧集列表用，不做全库校验）
   ipcMain.handle('library:rescan-folder', (_e, folder) => scanner.scanFolderShallow(folder));
+
+  // ---- 播放历史 ----
+  ipcMain.handle('history:list', () => [...db.allHistory()].sort((a, b) => (b.playedAt || 0) - (a.playedAt || 0)));
+  // 登记播放：渲染层每次真正起播时调用
+  ipcMain.handle('history:touch', (_e, rec) => {
+    if (!rec || !rec.path) return null;
+    return db.touchHistory(rec);
+  });
+  // 从历史打开：与资源管理器双击文件完全同一条链路
+  // （不在片库中会先自动登记，再经 open-video-file 事件交给渲染层 showPlayer）
+  ipcMain.handle('history:open', async (_e, filePath) => {
+    if (!filePath) return { ok: false, error: '记录无效' };
+    // 全程异步：NAS 断连等情况下主进程不能被文件系统调用卡住
+    const v = await importVideoFileAsync(filePath);
+    if (!v) return { ok: false, error: '文件不存在或无法访问，可能已被移动或删除' };
+    queueOpenVideos([v]);
+    return { ok: true };
+  });
+  ipcMain.handle('history:remove', (_e, paths) => db.removeHistory(paths || []));
+  ipcMain.handle('history:clear', () => db.clearHistory());
 
   ipcMain.handle('video:read', async (_e, filePath) => {
     // 校验是库内视频，返回可直接喂给 <video> 的 URL；audio 为缓存过的编码探测结果（可能为 null）
@@ -497,9 +536,10 @@ if (!app.requestSingleInstanceLock()) {
         else assoc.touchMuiCache(assocCfg());
       } catch { /* 关联修复失败不影响启动 */ }
     }
+    // 播放历史首次启用：用片库已有的播放记录（lastPlayed）回填，老用户打开历史页不为空
+    db.seedHistoryFromVideos();
     // 一次性迁移：旧的"星标标签收藏"转为收藏分类
-    const oldTags = db.getSettings().favTags || [];
-    if (oldTags.length && db.getCollections().length === 0) {
+    const oldTags = db.getSettings().favTags || [];    if (oldTags.length && db.getCollections().length === 0) {
       for (const t of oldTags) {
         const ids = db.allVideos().filter(v => (v.tags || []).includes(t)).map(v => v.id);
         if (ids.length) db.getCollections().push({ id: 'c_mig_' + t, name: t, ids, dirs: [], createdAt: Date.now() });

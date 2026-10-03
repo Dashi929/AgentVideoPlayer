@@ -87,6 +87,63 @@ function removeFolder(p) {
   save();
 }
 
+// ---- 播放历史：只记"播放过"，与片库记录相互独立（删历史不动片库/磁盘，删片库也不清历史）----
+const HISTORY_MAX = 300;
+function allHistory() {
+  const d = load();
+  if (!d.history) d.history = [];
+  return d.history;
+}
+/** 登记一次播放：同一路径只保留一条并置顶（路径大小写不敏感） */
+function touchHistory(rec) {
+  const d = load();
+  if (!d.history) d.history = [];
+  const key = String(rec.path).toLowerCase();
+  const i = d.history.findIndex(h => String(h.path).toLowerCase() === key);
+  const old = i >= 0 ? d.history.splice(i, 1)[0] : {};
+  const entry = {
+    path: rec.path,
+    name: rec.name || old.name || path.basename(rec.path),
+    folder: rec.folder || old.folder || path.dirname(rec.path),
+    playedAt: Date.now(),
+  };
+  d.history.unshift(entry);
+  if (d.history.length > HISTORY_MAX) d.history.length = HISTORY_MAX;
+  save();
+  return entry;
+}
+function removeHistory(paths) {
+  const d = load();
+  if (!d.history) d.history = [];
+  const keys = new Set((paths || []).map(p => String(p).toLowerCase()));
+  const before = d.history.length;
+  d.history = d.history.filter(h => !keys.has(String(h.path).toLowerCase()));
+  save();
+  return before - d.history.length;
+}
+function clearHistory() {
+  const d = load();
+  const n = (d.history || []).length;
+  d.history = [];
+  save();
+  return n;
+}
+/**
+ * 首次启用历史功能时用片库已有的 lastPlayed 回填，老用户打开历史页不至于是空的。
+ * 只在 history 字段从未初始化过时执行一次；用户清空过的（[]）不会被再次填充。
+ */
+function seedHistoryFromVideos() {
+  const d = load();
+  if (Array.isArray(d.history)) return 0;
+  const played = Object.values(d.videos || {}).filter(v => (v.lastPlayed || 0) > 0);
+  played.sort((a, b) => (b.lastPlayed || 0) - (a.lastPlayed || 0));
+  d.history = played.slice(0, HISTORY_MAX).map(v => ({
+    path: v.path, name: v.name, folder: v.folder, playedAt: v.lastPlayed,
+  }));
+  save();
+  return d.history.length;
+}
+
 function removeVideo(id) {
   delete load().videos[id];
   save();
@@ -102,4 +159,4 @@ function deleteVideosMissing(scanRoots) {
   return removed;
 }
 
-module.exports = { load, save, getSettings, updateSettings, allVideos, getVideo, upsertVideo, removeVideo, deleteVideosMissing, dbPath, coversDir, getCollections, saveCollections, allFolders, getFolderByPath, upsertFolder, removeFolder };
+module.exports = { load, save, getSettings, updateSettings, allVideos, getVideo, upsertVideo, removeVideo, deleteVideosMissing, dbPath, coversDir, getCollections, saveCollections, allFolders, getFolderByPath, upsertFolder, removeFolder, allHistory, touchHistory, removeHistory, clearHistory, seedHistoryFromVideos };
