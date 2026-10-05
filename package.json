@@ -1,6 +1,6 @@
 {
   "name": "agent-video-player",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "AgentVideoPlayer",
   "main": "main/main.js",
   "scripts": {

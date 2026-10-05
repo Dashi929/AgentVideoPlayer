@@ -361,6 +361,7 @@ function stopStream() {
     stream = null;
   }
   restarting = false;
+  hideFreezeFrame();
   videoEl.removeAttribute('crossorigin');
 }
 
@@ -399,6 +400,49 @@ function schedulePrepare(t, immediate) {
   else prepareTimer = setTimeout(() => fire(false), 140); // 悬停：停稳 140ms 再起（带预读），避免扫过每个位置
 }
 
+// ---- 定格帧：流重启（快进/快退/远跳）期间用上一帧盖住视频区，避免黑屏闪烁 ----
+let freezeCanvas = null;
+let freezeGen = 0;    // 定格代次：连续快进时旧回调不能撤下新定格
+let freezeTimer = null;
+
+/** 捕捉当前画面并显示为定格帧；返回 true 表示画面区已被盖住（新画面上屏前不会见黑） */
+function showFreezeFrame() {
+  try {
+    if (freezeCanvas && !freezeCanvas.classList.contains('hidden')) return true; // 上一次定格还在，保持
+    if (videoEl.readyState < 2 || !videoEl.videoWidth) return false; // 无可用帧（如刚换片）
+    if (!freezeCanvas) {
+      freezeCanvas = document.createElement('canvas');
+      freezeCanvas.id = 'freezeFrame';
+      freezeCanvas.classList.add('hidden');
+      wrap.appendChild(freezeCanvas);
+    }
+    const rect = wrap.getBoundingClientRect();
+    const cw = Math.max(2, Math.round(rect.width));
+    const ch = Math.max(2, Math.round(rect.height));
+    if (freezeCanvas.width !== cw || freezeCanvas.height !== ch) { freezeCanvas.width = cw; freezeCanvas.height = ch; }
+    const ctx = freezeCanvas.getContext('2d');
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, cw, ch);
+    if (wrap.classList.contains('force-fill')) {
+      ctx.drawImage(videoEl, 0, 0, cw, ch); // 拉伸铺满模式：与 video 的 object-fit:fill 一致
+    } else {
+      const scale = Math.min(cw / videoEl.videoWidth, ch / videoEl.videoHeight);
+      const dw = videoEl.videoWidth * scale, dh = videoEl.videoHeight * scale;
+      ctx.drawImage(videoEl, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+    }
+    freezeCanvas.style.filter = videoEl.style.filter || ''; // 画面调节参数保持一致
+    freezeCanvas.classList.remove('hidden');
+    return true;
+  } catch { return false; } // 拿不到帧就维持原行为（黑屏），不影响跳转
+}
+
+/** 撤下定格帧（gen 供旧代次回调失效判断） */
+function hideFreezeFrame(gen) {
+  if (gen != null && gen !== freezeGen) return;
+  clearTimeout(freezeTimer);
+  if (freezeCanvas) freezeCanvas.classList.add('hidden');
+}
+
 let restartTimer = null;
 let pendingSeek = 0;
 let pendingAudio = -1; // ≥0 表示重启时同时切到这条音轨
@@ -427,8 +471,21 @@ function queueStreamRestart(t, newAudio) {
       stream.offset = pendingSeek;
       if (wantAudio >= 0) audioIdx = wantAudio;
     }
+    // 定格当前画面盖住 load() 后的黑屏；新流真正出帧后自动撤下
+    const hadFreeze = showFreezeFrame();
+    freezeGen++;
+    const gen = freezeGen;
     videoEl.load(); // 重新请求同一 URL，服务端按新起点/新音轨重启 ffmpeg
     videoEl.play().catch(() => {});
+    if (hadFreeze) {
+      const release = () => hideFreezeFrame(gen);
+      // rVFC：新流第一帧被合成时回调（精确时机）
+      if (typeof videoEl.requestVideoFrameCallback === 'function') videoEl.requestVideoFrameCallback(release);
+      // 兜底：rVFC 缺席时等播放真正恢复后再撤（留一拍给合成器）
+      videoEl.addEventListener('playing', () => setTimeout(release, 120), { once: true });
+      clearTimeout(freezeTimer);
+      freezeTimer = setTimeout(release, 2500); // 硬兜底：异常久无新帧也不能一直盖着
+    }
   }, 40); // 防抖：吸收快速连点（关键帧查询走索引、服务端已有预热进程，无需久等）
 }
 
