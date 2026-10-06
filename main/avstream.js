@@ -70,13 +70,18 @@ function killProc(sess) {
   }
 }
 
-/** 丢弃未采用的预热进程 */
-function killPrefetch(sess) {
-  const pf = sess && sess.prefetch;
-  if (!pf) return;
-  sess.prefetch = null;
-  clearTimeout(pf.timer);
-  try { pf.proc.kill(); } catch { /* 已退出 */ }
+/**
+ * 丢弃预热进程。带 pf 时精确杀这一个（含已被覆盖的过期预热），否则杀当前 s.prefetch。
+ * 过期的预热进程若不杀掉，会一直 remux/转码到文件结束（NAS remux 吃满带宽、转码吃满
+ * CPU），反复跳转后越积越多——这是"用久了越来越卡"的根源，所以必须精确到 pf 本体。
+ */
+function killPrefetch(sess, pf) {
+  const target = pf || (sess && sess.prefetch);
+  if (!target) return;
+  clearTimeout(target.timer);
+  if (sess && sess.prefetch === target) sess.prefetch = null;
+  if (sess && sess.proc === target.proc) return; // 已被 spawnFor 接管为正式流，不能误杀
+  try { target.proc.kill(); } catch { /* 已退出 */ }
 }
 
 /**
@@ -222,6 +227,9 @@ async function prepare(id, t, immediate) {
   }
   // 预读期间用户可能已完成跳转（目标成了当前流起点）：此时无需再起预热进程
   if (s.startAt === key) { dbg('prepare: became current during preread, skip spawn'); return true; }
+  // 探测/预读的等待期间可能有别的 prepare 已就位新预热：spawn 前必须再杀一次。
+  // kill→spawn→登记之间没有 await（原子），保证并发 prepare 不会互相孤儿化 ffmpeg。
+  killPrefetch(s);
   const cfg = { file: s.file, startAt: key, videoCopy, audioCopy: s.audioCopy, audioIndex: s.audioIndex };
   let proc;
   try {
@@ -242,7 +250,7 @@ async function prepare(id, t, immediate) {
   proc.stderr.on('data', d => { proc._errTail = ((proc._errTail || '') + String(d)).slice(-2000); if (DBG) dbg('prefetch stderr', String(d).slice(0, 160)); });
   proc.on('error', () => { if (s.prefetch === pf) s.prefetch = null; });
   proc.on('exit', () => { if (s.prefetch === pf) s.prefetch = null; });
-  pf.timer = setTimeout(() => killPrefetch(s), PREFETCH_TTL_MS);
+  pf.timer = setTimeout(() => killPrefetch(s, pf), PREFETCH_TTL_MS); // 只杀自己的 pf：过期定时器不能误杀后来者
   return true;
 }
 

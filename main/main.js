@@ -157,12 +157,16 @@ function askRendererCapture(videoPath, times) {
   return new Promise((resolve, reject) => {
     const wc = win?.webContents;
     if (!wc) return reject(new Error('窗口不可用'));
-    const timeout = setTimeout(() => reject(new Error('截帧超时')), 45000);
     const handler = (_e, payload) => {
       clearTimeout(timeout);
       ipcMain.removeListener('capture-frames-result', handler);
       resolve(payload);
     };
+    // 超时必须摘掉监听器：泄漏的 handler 会在后续截帧结果到来时被反复触发
+    const timeout = setTimeout(() => {
+      ipcMain.removeListener('capture-frames-result', handler);
+      reject(new Error('截帧超时'));
+    }, 45000);
     ipcMain.on('capture-frames-result', handler);
     wc.send('capture-frames', { videoPath, times });
   });

@@ -84,6 +84,11 @@ function channelsLabel(raw) {
 }
 
 const probeCache = new Map();
+const PROBE_CACHE_MAX = 256; // 探测结果很小，但长期不关软件会一直打开新视频，仍设上限防积累
+function probeCacheSet(key, info) {
+  probeCache.set(key, info);
+  if (probeCache.size > PROBE_CACHE_MAX) probeCache.delete(probeCache.keys().next().value);
+}
 
 /**
  * 用 ffmpeg -i 读文件头，探测音轨/视频/内嵌字幕。
@@ -150,7 +155,7 @@ function probeMedia(file) {
           videoCopyable: video.length > 0 && VIDEO_COPY_OK.has(video[0].codec),
           subtitleTracks: subs.map(t => ({ ...t })),
         };
-        probeCache.set(key, info);
+        probeCacheSet(key, info);
         resolve(info);
       });
   });

@@ -744,17 +744,59 @@ function renderPlaylistPanel() {
   });
 }
 
-async function togglePlaylistPanel() {
-  if (playlistPanelOpen()) {
-    playListPanel.classList.add('hidden');
-    showControls();
-    return;
-  }
-  if (current) await loadPlaylist(current); // 展开时刷新一遍文件夹内容
+// ---- 播放列表面板自动展示：鼠标接近窗口右缘滑出，离开面板区域自动收回 ----
+// 触发区纵向范围与面板一致（styles.css #playListPanel 的 top/bottom 88px），
+// 避开顶部工具按钮与底部控制条/进度条，防止悬停按钮或拖进度条时误触发
+const PLP_EDGE_PX = 28;        // 距右缘多少像素触发展示
+const PLP_BAND_INSET = 88;     // 触发区上下留白，与面板几何一致
+const PLP_HIDE_DELAY_MS = 300; // 离开面板后延迟收回，给移回面板/右缘留缓冲
+let plpHideTimer = null;
+let lastMouse = { x: 0, y: 0 };
+
+function mouseInPlaylistZone(x, y) {
+  const r = wrap.getBoundingClientRect();
+  const ry = y - r.top;
+  return x >= r.right - PLP_EDGE_PX && ry >= PLP_BAND_INSET && ry <= r.height - PLP_BAND_INSET;
+}
+function showPlaylistPanel() {
+  clearTimeout(plpHideTimer);
+  if (playlistPanelOpen()) return;
+  if (current) loadPlaylist(current).catch(() => {}); // 展开时刷新一遍文件夹内容，完成后内部会重绘
   renderPlaylistPanel();
   playListPanel.classList.remove('hidden');
   showControls();
   plpList.querySelector('.plp-item.active')?.scrollIntoView({ block: 'nearest' });
+}
+function hidePlaylistPanel() {
+  clearTimeout(plpHideTimer);
+  playListPanel.classList.add('hidden');
+}
+/** 光标离开面板/触发区后延迟收回；收回前复核光标位置（面板可能刚滑到静止的光标下） */
+function scheduleHidePlaylist() {
+  if (!playlistPanelOpen()) return;
+  clearTimeout(plpHideTimer);
+  plpHideTimer = setTimeout(() => {
+    if (!playlistPanelOpen()) return;
+    const el = document.elementFromPoint(lastMouse.x, lastMouse.y);
+    if (el && playListPanel.contains(el)) return; // 光标仍在面板上
+    if (mouseInPlaylistZone(lastMouse.x, lastMouse.y)) return; // 光标仍停在右缘触发区
+    hidePlaylistPanel();
+  }, PLP_HIDE_DELAY_MS);
+}
+wrap.addEventListener('mousemove', (e) => {
+  lastMouse.x = e.clientX;
+  lastMouse.y = e.clientY;
+  if (playlistPanelOpen() && playListPanel.contains(e.target)) { clearTimeout(plpHideTimer); return; }
+  if (current && !menuLayerVisible() && mouseInPlaylistZone(e.clientX, e.clientY)) { showPlaylistPanel(); return; }
+  if (playlistPanelOpen()) scheduleHidePlaylist();
+});
+playListPanel.addEventListener('mouseenter', () => clearTimeout(plpHideTimer));
+playListPanel.addEventListener('mouseleave', scheduleHidePlaylist);
+wrap.addEventListener('mouseleave', scheduleHidePlaylist); // 光标移出播放器窗口时收起
+
+function togglePlaylistPanel() {
+  if (playlistPanelOpen()) { hidePlaylistPanel(); showControls(); return; }
+  showPlaylistPanel();
 }
 
 function togglePlay() {
@@ -1117,6 +1159,7 @@ export function initPlayer({ refreshLibrary: rl, refreshHistory: rh }) {
     videoEl.pause();
     stopStream();
     resetPreviewSource();
+    hidePlaylistPanel(); // 面板是跟随播放器的，离开时一并收起
     document.body.classList.remove('player-view');
     historyRecordedFor = null; // 离开播放器视为一次播放结束，再打开会刷新记录时间
     refreshLibrary();
@@ -1261,7 +1304,7 @@ export function initPlayer({ refreshLibrary: rl, refreshHistory: rh }) {
   document.addEventListener('keydown', (e) => {
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
     showControls();
-    if (e.key === 'Escape' && playlistPanelOpen()) { playListPanel.classList.add('hidden'); return; }
+    if (e.key === 'Escape' && playlistPanelOpen()) { hidePlaylistPanel(); return; }
     if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
     else if (e.code === 'ArrowRight') seekTo(dispTime() + 5);
     else if (e.code === 'ArrowLeft') seekTo(dispTime() - 5);
